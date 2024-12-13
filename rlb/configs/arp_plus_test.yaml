@@ -10,8 +10,7 @@ hydra:
 py_module: autoregressive_policy_plus
 
 model:
-  # weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
-  weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
+  weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
 
   hp:
     add_corr: true
@@ -123,6 +122,8 @@ eval:
 
 
 
-output_dir: ${hydra:run.dir} 
-# output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'
+# output_dir: ${hydra:run.dir} 
+output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'3tasks_20000'
 wandb: null
+
+#python3 eval.py config=./configs/arp_plus_test.yaml  model.weights=./outputs/default/2024-12-12_09-30/model_53333.pth  hydra.job.name=eval.arp_plus
