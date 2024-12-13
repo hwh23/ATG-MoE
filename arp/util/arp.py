@@ -28,7 +28,7 @@ print(sys.path)
 sys.path.insert(0, '/opt/data/private/arp')
 print(sys.path)
 
-from moe import TaskMoE
+from arp.moe import TaskMoE
 ##
 
 #region Chunk Transformer Layer

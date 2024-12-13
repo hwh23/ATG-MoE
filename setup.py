@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="arpmoe",
+    name="arp",
     version="0.1",
     packages=find_packages(),
     install_requires=[],

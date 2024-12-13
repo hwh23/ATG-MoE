@@ -10,8 +10,8 @@ hydra:
 py_module: autoregressive_policy_plus
 
 model:
-  # weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
-  weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
+  weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
+  # weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
 
   hp:
     add_corr: true

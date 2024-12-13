@@ -26,6 +26,7 @@ from preprocess import CubePointCloudRenderer, preprocess_images_in_batch, \
     flatten_img_pc_to_points, clamp_pc_in_bound, place_pc_in_cube, generate_heatmap_from_screen_pts, \
     apply_se3_augmentation, transform_pc, grid_sample_from_heatmap, add_uniform_noise, denorm_rgb
 
+
 from utils.layers import (
     Conv2DBlock,
     Conv2DUpsampleBlock,
@@ -36,8 +37,241 @@ from utils.layers import (
     FixedPositionalEncoding
 )
 
-from arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
-from autoregressive_policy import MultiViewTransformer, Policy
+from arp.util.arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
+
+
+class MultiViewTransformer(nn.Module):
+    def __init__(self, cfg: DictConfig, renderer: Optional[CubePointCloudRenderer]=None):
+        super().__init__()
+        self.depth = cfg.depth
+        self.img_feat_dim = cfg.img_feat_dim
+        self.img_size = cfg.img_size
+        self.add_proprio = cfg.add_proprio
+        self.proprio_dim = cfg.proprio_dim
+        self.add_lang = cfg.add_lang
+        self.lang_dim = cfg.lang_dim
+        self.lang_len = cfg.lang_len
+        self.im_channels = cfg.im_channels # 64
+        self.img_patch_size = cfg.img_patch_size
+        self.attn_dropout = cfg.attn_dropout
+        self.add_corr = cfg.add_corr
+        self.add_pixel_loc = cfg.add_pixel_loc
+        self.add_depth = cfg.add_depth
+        self.pe_fix = cfg.pe_fix
+        self.attn_dim = cfg.attn_dim
+        self.attn_heads = cfg.attn_heads
+        self.attn_dim_head = cfg.attn_dim_head
+        self.attn_dropout = cfg.attn_dropout
+        self.use_xformers = cfg.use_xformers
+        self.feat_dim = cfg.feat_dim
+        activation = "lrelu"
+
+        self.norm_corr = cfg.norm_corr
+        self.num_rot = cfg.num_rotation_classes
+        print(f"MVT Vars: {vars(self)}")
+
+        assert not renderer is None
+        self.renderer = renderer
+        self.num_cameras = self.renderer.num_cameras
+
+        # patchified input dimensions
+        spatial_size = self.img_size // self.img_patch_size  # 16
+
+        if self.add_proprio:
+            # 64 img features + 64 proprio features
+            self.input_dim_before_seq = self.im_channels * 2
+        else:
+            self.input_dim_before_seq = self.im_channels
+
+        # learnable positional encoding
+        if self.add_lang:
+            lang_emb_dim, lang_max_seq_len = self.lang_dim, self.lang_len
+        else:
+            lang_emb_dim, lang_max_seq_len = 0, 0
+        self.lang_emb_dim = lang_emb_dim
+        self.lang_max_seq_len = lang_max_seq_len
+
+        if self.pe_fix:
+            num_pe_token = spatial_size**2 * self.num_cameras
+        else:
+            num_pe_token = lang_max_seq_len + (spatial_size**2 * self.num_cameras)
+
+        self.pos_encoding = nn.Parameter(torch.randn(1, num_pe_token, self.input_dim_before_seq))
+
+        inp_img_feat_dim = self.img_feat_dim
+        if self.add_corr:
+            inp_img_feat_dim += 3
+        if self.add_pixel_loc:
+            inp_img_feat_dim += 3
+            self.pixel_loc = torch.zeros((self.num_cameras, 3, self.img_size, self.img_size))
+            self.pixel_loc[:, 0, :, :] = torch.linspace(-1, 1, self.num_cameras).unsqueeze(-1).unsqueeze(-1)
+            self.pixel_loc[:, 1, :, :] = torch.linspace(-1, 1, self.img_size).unsqueeze(0).unsqueeze(-1)
+            self.pixel_loc[:, 2, :, :] = torch.linspace(-1, 1, self.img_size).unsqueeze(0).unsqueeze(0) # [3, 3, 224, 224]
+
+        if self.add_depth:
+            inp_img_feat_dim += 1
+
+        if self.add_proprio:
+            # proprio preprocessing encoder
+            self.proprio_preprocess = DenseBlock(
+                self.proprio_dim,
+                self.im_channels,
+                norm="group",
+                activation=activation,
+            )
+
+        self.patchify = Conv2DBlock(
+            inp_img_feat_dim,
+            self.im_channels,
+            kernel_sizes=self.img_patch_size,
+            strides=self.img_patch_size,
+            norm="group",
+            activation=activation,
+            padding=0,
+        )
+
+        # lang preprocess
+        if self.add_lang:
+            self.lang_preprocess = DenseBlock(
+                lang_emb_dim,
+                self.im_channels * 2,
+                norm="group",
+                activation=activation,
+            )
+
+        self.fc_bef_attn = DenseBlock(
+            self.input_dim_before_seq,
+            self.attn_dim,
+            norm=None,
+            activation=None,
+        )
+        self.fc_aft_attn = DenseBlock(
+            self.attn_dim,
+            self.input_dim_before_seq,
+            norm=None,
+            activation=None,
+        )
+
+        get_attn_attn = lambda: PreNorm(
+            self.attn_dim,
+            Attention(
+                self.attn_dim,
+                heads=self.attn_heads,
+                dim_head=self.attn_dim_head,
+                dropout=self.attn_dropout,
+                use_fast=self.use_xformers,
+            ),
+        )
+        # TODO：这里的ffn
+        get_attn_ff = lambda: PreNorm(self.attn_dim, FeedForward(self.attn_dim))
+        # self-attention layers
+        self.layers = nn.ModuleList([])
+        attn_depth = self.depth
+
+        for _ in range(attn_depth):
+            self.layers.append(nn.ModuleList([get_attn_attn(), get_attn_ff()]))
+
+        # self.view_embedding = nn.Embedding(self.num_cameras, self.input_dim_before_seq)
+
+
+    def forward(
+        self,
+        img,
+        proprio=None,
+        lang_emb=None
+    ):
+        """
+        :param img: tensor of shape (bs, num_cameras, img_feat_dim, h, w)
+        :param proprio: tensor of shape (bs, priprio_dim)
+        :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
+        """
+
+        bs, num_cameras, img_feat_dim, h, w = img.shape
+        num_pat_img = h // self.img_patch_size
+        assert num_cameras == self.num_cameras
+        # assert img_feat_dim == self.img_feat_dim
+        assert h == w == self.img_size
+
+        img = img.view(bs * num_cameras, img_feat_dim, h, w)
+        # preprocess
+        # (bs * num_img, im_channels, h, w) ->
+        # (bs * num_img, im_channels, h / img_patch_strid, w / img_patch_strid) patches
+        ins = self.patchify(img)
+        # (bs, im_channels, num_img, h / img_patch_strid, w / img_patch_strid) patches
+        ins = (
+            ins.view(
+                bs,
+                num_cameras,
+                self.im_channels,
+                num_pat_img,
+                num_pat_img,
+            )
+            .transpose(1, 2)
+            .clone()
+        )
+
+        # concat proprio
+        _, _, _d, _h, _w = ins.shape
+        if self.add_proprio:
+            p = self.proprio_preprocess(proprio)  # [B,4] -> [B,64]
+            p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w)
+            ins = torch.cat([ins, p], dim=1)  # [B, 128, num_img, np, np]
+
+        # channel last
+        ins = rearrange(ins, "b d ... -> b ... d")  # [B, num_img, np, np, 128]
+
+        # save original shape of input for layer
+        ins_orig_shape = ins.shape
+
+        # flatten patches into sequence
+        ins = rearrange(ins, "b ... d -> b (...) d")  # [B, num_img * np * np, 128]
+        # add learable pos encoding
+        # only added to image tokens
+        if self.pe_fix:
+            ins += self.pos_encoding
+
+        # append language features as sequence
+        num_lang_tok = 0
+        if self.add_lang:
+            l = self.lang_preprocess(
+                lang_emb.view(bs * self.lang_max_seq_len, self.lang_emb_dim)
+            )
+            l = l.view(bs, self.lang_max_seq_len, -1)
+            num_lang_tok = l.shape[1]
+            ins = torch.cat((l, ins), dim=1)  # [B, num_img * np * np + 77, 128]
+
+        # add learable pos encoding
+        if not self.pe_fix:
+            ins = ins + self.pos_encoding
+
+        x = self.fc_bef_attn(ins)
+        lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]
+
+        # within image self attention
+        imgx = imgx.reshape(bs * num_cameras, num_pat_img * num_pat_img, -1)
+        for self_attn, self_ff in self.layers[: len(self.layers) // 2]:
+            imgx = self_attn(imgx) + imgx
+            imgx = self_ff(imgx) + imgx
+
+        imgx = imgx.view(bs, num_cameras * num_pat_img * num_pat_img, -1)
+        x = torch.cat((lx, imgx), dim=1)
+        # cross attention
+        for self_attn, self_ff in self.layers[len(self.layers) // 2 :]:
+            x = self_attn(x) + x
+            x = self_ff(x) + x
+
+        # append language features as sequence
+        if self.add_lang:
+            # throwing away the language embeddings
+            x = x[:, num_lang_tok:]
+        x = self.fc_aft_attn(x)
+
+        # reshape back to orginal size
+        x = x.view(bs, *ins_orig_shape[1:-1], x.shape[-1])  # [B, num_cameras, np, np, 128]
+        x = rearrange(x, "b ... d -> b d ...")  # [B, 128, num_cameras, np, np]
+        x = x.transpose(1, 2) # [B, num_cameras, 128, np, np]
+        return x
+
 
 
 class PolicyNetwork(nn.Module):
@@ -110,15 +344,14 @@ class PolicyNetwork(nn.Module):
                 TokenType.make(name='prompt-features', dim=1, 
                             embedding='discrete', is_control=True, 
                             embedding_kwargs={'embed_from': "prompt-features"}), 
-
                 TokenType.make(
                         name='stage1-screen-pts', dim=2, is_continuous=True, dict_sizes=[self.img_size, self.img_size],
                         embedding="zero", predictor="upsample_from_2d_attn", 
-                        predictor_kwargs={'attn_with': 'visual-featmap', 'upscale_ratio': self.img_patch_size, 'label_name': 'smooth-heatmap'}),
+                        predictor_kwargs={'attn_with': 'visual-featmap', 'upscale_ratio': self.img_patch_size, 'label_name': 'smooth-heatmap', 'hidden_dim_mult': 1.25}),
                 TokenType.make(
                     name='stage2-screen-pts', dim=2, is_continuous=True, dict_sizes=[self.img_size, self.img_size],
                     embedding="zero", predictor="upsample_from_2d_attn", 
-                    predictor_kwargs={'attn_with': 'visual-featmap', 'upscale_ratio': self.img_patch_size, 'label_name': 'smooth-heatmap'}), 
+                    predictor_kwargs={'attn_with': 'visual-featmap', 'upscale_ratio': self.img_patch_size, 'label_name': 'smooth-heatmap',  'hidden_dim_mult': 1.25}), 
             ] +  [
                 TokenType.make(name=f'rot-{c}', dim=1, is_continuous=False, dict_sizes=[self._num_rotation_classes], embedding='position_1d', predictor='class', predictor_kwargs={'label_name': f'rot-{c}'}) for c in ['x', 'y', 'z']
             ] + [
@@ -126,10 +359,10 @@ class PolicyNetwork(nn.Module):
                 TokenType.make(name='collision', dim=1, is_continuous=False, dict_sizes=[2], embedding='discrete', predictor='class')
             ],
             layers=[
-                LayerType.make(n_head=8, AdaLN=True, condition_on='visual-tokens', name='cross')
+                LayerType.make(n_head=8, AdaLN=True, norm_before_AdaLN=True, condition_on='visual-tokens', name='cross')
             ] * 4 + [
                 LayerType.make(n_head=8, name='self')
-            ] * 6
+            ] * 4
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
         
@@ -300,7 +533,6 @@ class PolicyNetwork(nn.Module):
         pc, img_feat = clamp_pc_in_bound(pc, img_feat, self.scene_bounds, skip=not self.move_pc_in_bound)
         pc_new, rev_trans_stage1, waypoint_stage1 = [], [], []
 
-        # Prepare point clouds for Stage 1 by centering them within a cube
         for i, _pc in enumerate(pc):
             a, b = place_pc_in_cube(_pc,
                 with_mean_or_bounds=self._place_with_mean,
@@ -313,12 +545,9 @@ class PolicyNetwork(nn.Module):
                 )[0].unsqueeze(0))
             pc_new.append(a)
             rev_trans_stage1.append(b)
-        # 缩放后的pc
         pc = pc_new
         bs = len(pc)
 
-        # Combine waypoints and apply noise augmentation during training
-        # TODO: x+=noise才会改变原来的元素
         if self.training:
             waypoint_stage1 = torch.cat(waypoint_stage1, axis=0).clone().detach()
             if self.point_augment_noise != 0:
@@ -328,25 +557,17 @@ class PolicyNetwork(nn.Module):
                         noise = stdv * ((2 * torch.rand(*x.shape, device=x.device)) - 1)
                         x += noise
 
-        # Render noisy visual features for Stage 1
         img = self.render(pc, img_feat, self.mvt1)
         #endregion ###########################
 
-        #  extracts visual feature maps
         visual_featmap_1 = self.mvt1(img=img, proprio=proprio, lang_emb=lang_goal_embs) # [B, num_cameras, 128, np, np]
 
-        #region Stage 1
         if self.training:
-            # Generate ground truth spatial heatmap
             smooth_spatial_label_stage1, screen_waypoint_stage1 = self.get_gt_translation_action(waypoint_stage1, dims=(bs, nc, h, w))
             stage1_chk_ids = torch.as_tensor([0], device=dev)[None, :]
 
             # the 0, 0 are dummy input
             seq = torch.as_tensor([0, 0, self.policy.token_name_2_ids['stage1-screen-pts']], device=dev).reshape(1, 1, 3).repeat(bs, 1, 1)
-            
-            # Compute loss for each camera view 
-            # between noisy visual feature map visual_featmap_1 (this featmap generated from noisy img_feat)
-            # and ground truth smooth_spatial_label_stage1 
             tmp_loss_dict = defaultdict(list)
             for view_id in range(3):
                 _loss_dict = self.policy.compute_loss(seq, stage1_chk_ids, match_layer='cross',
@@ -354,15 +575,12 @@ class PolicyNetwork(nn.Module):
                                 'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                 'visual-featmap': visual_featmap_1[:, view_id],
                                 'smooth-heatmap': smooth_spatial_label_stage1[:, :, view_id]
-                            },
-                            task_ids=observation['task_idx'])
+                            })
                 for k, v in _loss_dict.items():
                     tmp_loss_dict[k].append(v)
             
-            # Combine losses for Stage 1 with mean
             loss_dicts.append({k: sum(v) / len(v) for k, v in tmp_loss_dict.items()})
         else:
-            # Inference: Generate waypoint predictions for Stage 1
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage1-screen-pts'])]
 
@@ -372,36 +590,26 @@ class PolicyNetwork(nn.Module):
                                     contexts={
                                             'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_1[:, view_id],
-                                    },
-                                    task_ids=observation['task_idx'])
+                                    })
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
                              for hm_logits in self.spatial_logits_buffer], dim=1)
-            
-            # predict the 3d point in a cube
             pred_pt = [self.renderer.get_most_likely_point_3d(hms[i : i + 1]) for i in range(bs)]
             waypoint_stage1 = torch.cat(pred_pt, 0) # bs, 3
             self.spatial_logits_buffer.clear()
-        #endregion
 
-        #region Stage 2
         with torch.no_grad():
             if self.training:
-                # Add uniform noise on groundtruth waypoint 
-                # and transform it to point clouds
                 waypoint_stage1_noisy = add_uniform_noise(
                     waypoint_stage1.clone().detach(), 2 * self.stage2_waypoint_label_noise
                 )
-                # 把pc从cube大小放大到self.stage2_zoom_scale
                 pc, rev_trans_stage2 = transform_pc(pc, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
-                # 把gt 轨迹放到加噪后的轨迹的中心点,并且放大到self.stage2_zoom_scale
                 waypoint_stage2, _ = transform_pc(waypoint_stage1, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
             else:
-                # Transform the way point predicted from stage1
                 pc, rev_trans_stage2 = transform_pc(pc, loc=waypoint_stage1, sca=self.stage2_zoom_scale)
                 waypoint_stage1_noisy = waypoint_stage1
                 waypoint_stage2 = None
-        # Render visual features for Stage 2. Same img_feat but with mvt2
+
         img = self.render(pc, img_feat, self.mvt2)
         visual_featmap_2 = self.mvt2(img=img, proprio=proprio, lang_emb=lang_goal_embs)
 
@@ -413,8 +621,7 @@ class PolicyNetwork(nn.Module):
                 action_grip,       # (bs)
                 action_collision,  # (bs)
             ) = [v.argmax(-1) for v in self.get_gt_rot_grip_collision(bs, action_rot, action_grip, action_ignore_collisions, device=dev)]
-            
-            # Add rotation noise if needed
+
             if self.rotation_aug:
                 rotation_aug = torch.from_numpy(np.random.choice(self.rotation_aug[0], p=self.rotation_aug[1], size=(bs, 3))).to(dev)
                 action_rot_aug_x = action_rot_x + rotation_aug[:, 0]
@@ -432,23 +639,19 @@ class PolicyNetwork(nn.Module):
             stage2_chk_ids = torch.as_tensor([0], device=dev)[None, :]
             seq = torch.as_tensor([0, 0, self.policy.token_name_2_ids['stage2-screen-pts']], device=dev).reshape(1, 1, 3).repeat(bs, 1, 1)
             tmp_loss_dict = defaultdict(list)
-            
-            # compute cross entropy loss for visual feature map2
             for view_id in range(3):
                 _loss_dict = self.policy.compute_loss(seq, stage2_chk_ids, match_layer='cross',
                             contexts={
                                 'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                 'visual-featmap': visual_featmap_2[:, view_id],
                                 'smooth-heatmap': smooth_spatial_label_stage2[:, :, view_id]
-                            },
-                            task_ids=observation['task_idx'])
+                            })
                 for k, v in _loss_dict.items():
                     tmp_loss_dict[k].append(v)
             loss_dicts.append({k: sum(v) / len(v) for k, v in tmp_loss_dict.items()})
 
             # ------------------------------------------- #
-            
-            # compute gripper loss
+
             prompt_features = torch.cat([ # [bs, 6, 128]
                     grid_sample_from_heatmap(screen_waypoint_stage2.reshape(-1, 1, 2) / self.img_patch_size, 
                                             visual_featmap_2.flatten(0, 1))[0].reshape(bs, -1, 128),
@@ -473,11 +676,9 @@ class PolicyNetwork(nn.Module):
                                                             'prompt-features': prompt_features,
                                                             'rot-x': action_rot_x[:, None],
                                                             'rot-y': action_rot_y[:, None], 'rot-z': action_rot_z[:, None]
-                                                         },
-                                                         task_ids=observation['task_idx'])
+                                                         })
             loss_dicts.append(loss_dict_gripper)
         else:
-            # Generate future waypoint from prompt
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage2-screen-pts'])]
             for view_id in range(3):
@@ -485,8 +686,7 @@ class PolicyNetwork(nn.Module):
                                     contexts={
                                             'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_2[:, view_id],
-                                    },
-                                    task_ids=observation['task_idx'])
+                                    })
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
 
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
@@ -511,12 +711,8 @@ class PolicyNetwork(nn.Module):
                                                     sample=False,  block_attn_directions=self.block_attn_directions,  
                                                     contexts={
                                                         'prompt-features': prompt_features
-                                                    },
-                                                    task_ids=observation['task_idx'])
-        #endregion
-        
-        #region final output
-        # Get loss dictionary when training, get action when inferencing
+                                                    })
+
         if self.training:
             loss_dict = {}
             for d in loss_dicts: loss_dict.update(d)
@@ -525,7 +721,6 @@ class PolicyNetwork(nn.Module):
                     'v1_norm': norm(visual_featmap_1.flatten(0, 1)),
                     'v2_norm': norm(visual_featmap_2.flatten(0, 1))
             }
-            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()
             return loss_dict
         else:
             final_waypoint = rev_trans_stage1[0](rev_trans_stage2(waypoint_stage2))
@@ -540,5 +735,175 @@ class PolicyNetwork(nn.Module):
                 )
             )
             return continuous_action
-        #endregion
         
+
+
+
+
+class Policy:
+    def __init__(self, network: PolicyNetwork, model_cfg: DictConfig, log_dir=""):
+        self._optimizer_type = model_cfg.optimizer_type
+        self.warmup_steps = model_cfg.warmup_steps
+        self.lr_cos_dec = model_cfg.lr_cos_dec
+        self.cos_dec_max_step = model_cfg.cos_dec_max_step
+
+        self._lr = model_cfg.lr
+        self._lambda_weight_l2 = model_cfg.lambda_weight_l2
+        self.amp = model_cfg.amp
+        self.bnb = model_cfg.bnb
+        self.add_lang = model_cfg.add_lang
+        self.proprio_dim = model_cfg.proprio_dim
+
+        self._network = network
+        self.log_dir = log_dir
+        self.scaler = GradScaler(enabled=self.amp)
+
+    def build(self, training: bool, device: torch.device = 'cpu'):
+        self._training = training
+        self._device = device
+
+        if self._training:
+            if self._optimizer_type == "lamb":
+                if self.bnb:
+                    import bitsandbytes as bnb
+                    print("Using 8-Bit Optimizer")
+                    self._optimizer = bnb.optim.LAMB(
+                        self._network.parameters(),
+                        lr=self._lr,
+                        weight_decay=self._lambda_weight_l2,
+                        betas=(0.9, 0.999),
+                    )
+                else:
+                    # From: https://github.com/cybertronai/pytorch-lamb/blob/master/pytorch_lamb/lamb.py
+                    self._optimizer = Lamb(
+                        self._network.parameters(),
+                        lr=self._lr,
+                        weight_decay=self._lambda_weight_l2,
+                        betas=(0.9, 0.999),
+                        adam=False,
+                    )
+            elif self._optimizer_type == "adam":
+                self._optimizer = torch.optim.Adam(
+                    self._network.parameters(),
+                    lr=self._lr,
+                    weight_decay=self._lambda_weight_l2,
+                )
+            else:
+                raise Exception("Unknown optimizer")
+
+            if self.lr_cos_dec:
+                after_scheduler = CosineAnnealingLR(
+                    self._optimizer,
+                    T_max=self.cos_dec_max_step,
+                    eta_min=self._lr / 100,  # mininum lr
+                )
+            else:
+                after_scheduler = None
+            self._lr_sched = GradualWarmupScheduler(
+                self._optimizer,
+                multiplier=1,
+                total_epoch=self.warmup_steps,
+                after_scheduler=after_scheduler,
+            )
+
+    def load_clip(self):
+        self.clip_model, self.clip_preprocess = clip.load("RN50", device=self._device)
+        self.clip_model.eval()
+
+    def unload_clip(self):
+        del self.clip_model
+        del self.clip_preprocess
+        with torch.cuda.device(self._device):
+            torch.cuda.empty_cache()
+
+    def reset(self, **kwargs):
+        self._network.renderer.reset()
+
+    def eval(self):
+        self._network.eval()
+
+    def train(self):
+        self._network.train()
+
+    def load(self, model_path):
+        checkpoint = torch.load(model_path, map_location="cpu")
+        epoch = checkpoint.get("epoch", checkpoint.get("step", None))
+        model = self._network
+        if isinstance(model, DistributedDataParallel):
+            model.module.load_state_dict(checkpoint["model_state"])
+        else:
+            model.load_state_dict(checkpoint["model_state"])
+        try:
+            self._optimizer.load_state_dict(checkpoint["optimizer_state"])
+        except:
+            print("WARNING: Optimizer state not loaded. KNOW WHAT YOU ARE DOING!!")
+        try:
+            self._lr_sched.load_state_dict(checkpoint["lr_sched_state"])
+        except:
+            print("WARNING: No lr_sched_state in checkpoint" "KNOW WHAT YOU ARE DOING!!")
+        return epoch
+
+    def save(self, step):
+        model_path = f"{self.log_dir}/model_{step}.pth"
+        model = self._network
+        optimizer = self._optimizer
+        lr_sched = self._lr_sched
+        if isinstance(model, DistributedDataParallel):
+            model_state = model.module.state_dict()
+        else:
+            model_state = model.state_dict()
+        torch.save(
+            {
+                "step": step,
+                "model_state": model_state,
+                "optimizer_state": optimizer.state_dict(),
+                "lr_sched_state": lr_sched.state_dict(),
+            },
+            model_path
+        )
+
+    def update(
+        self,
+        replay_sample: dict,
+    ) -> dict:
+        assert replay_sample["gripper_pose"].shape[1:] == (7, )
+        assert replay_sample["lang_goal_embs"].shape[1:] == (77, 512)
+        assert replay_sample["low_dim_state"].shape[1:] == (self.proprio_dim,)
+        assert self._network.training
+        with autocast(enabled=self.amp):
+            loss_dict = self._network(replay_sample)
+            stat_dict = loss_dict.pop('stat_dict',  {})
+            total_loss = sum(loss_dict.values())
+            self._optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(total_loss).backward()
+            self.scaler.step(self._optimizer)
+            self.scaler.update()
+            self._lr_sched.step()
+            loss_log = {
+                **{k: v.item() for k, v in loss_dict.items()},
+                "lr": self._optimizer.param_groups[0]["lr"],
+                **stat_dict
+            }
+        return loss_log
+
+    @torch.no_grad()
+    def act(
+        self, step: int, observation: dict
+    ) -> ActResult:
+        assert observation['left_shoulder_rgb'].size(0) == 1, "Only batch size 1 is supported for evaluation"
+        if self.add_lang:
+            lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
+            _, lang_goal_embs = clip_encode_text(self.clip_model, lang_goal_tokens)
+            lang_goal_embs = lang_goal_embs.float()
+            observation['lang_goal_embs'] = lang_goal_embs
+        else:
+            lang_goal_embs = (
+                torch.zeros(observation["lang_goal_embs"].shape)
+                .float()
+                .to(self._device)
+            )
+            observation['lang_goal_embs'] = lang_goal_embs
+        assert not self._network.training
+        continuous_action = self._network(observation)
+        return ActResult(continuous_action)
+

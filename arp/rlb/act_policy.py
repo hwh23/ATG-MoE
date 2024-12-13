@@ -38,7 +38,7 @@ from utils.layers import (
 import math
 import utils.act as act
 from autoregressive_policy import Policy, MultiViewTransformer
-from arp import ConvUpsample
+from arp.arp import ConvUpsample
 
 
 def embed_position_2d(positions, n_embd, N=10000):

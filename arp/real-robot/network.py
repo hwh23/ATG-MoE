@@ -5,7 +5,7 @@ from transformers import Dinov2Model
 from peft import LoraConfig, get_peft_model
 import numpy as np
 from collections import defaultdict, Counter
-import arp
+import arp.util.arp
 from torchvision.transforms.functional import to_pil_image
 import torch
 import os.path as osp

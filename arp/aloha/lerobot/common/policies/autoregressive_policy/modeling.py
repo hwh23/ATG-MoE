@@ -20,7 +20,7 @@ from .configuration import ARPConfig
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from typing import Union, Optional, List, Dict, Tuple
 import torch.distributions as D
-import arp
+import arp.util.arp
 from lerobot.common.utils.nn import SinusoidalPositionEmbedding2d, generate_heatmap_from_screen_pts, to_red_heatmap, denorm_rgb
 
 

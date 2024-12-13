@@ -1,5 +1,6 @@
 from typing import Dict, Tuple, List, Union
 import torchvision
+from PIL import Image
 from dataclasses import dataclass
 from copy import deepcopy
 import math
@@ -10,6 +11,7 @@ from argparse import Namespace
 from einops import rearrange, reduce
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
+import numpy as np
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from diffusion_policy.common.robomimic_config_util import get_robomimic_config
@@ -19,8 +21,52 @@ import robomimic.utils.obs_utils as ObsUtils
 import robomimic.models.base_nets as rmbn
 import diffusion_policy.model.vision.crop_randomizer as dmvc
 from diffusion_policy.common.pytorch_util import dict_apply, replace_submodules
-import arp
+import arp.util.arp
+from torchvision.transforms.functional import to_pil_image
 
+def denorm_rgb(img):
+    return (img + 1) / 2
+
+def to_red_heatmap(heatmap, normalize=True):
+    if normalize:
+        heatmap = heatmap / heatmap.max()
+    heatmap = torch.cat((heatmap[:, None, : ,:], torch.zeros(len(heatmap), 2, *heatmap.shape[1:], device=heatmap.device)), dim=1)
+    return heatmap
+
+def generate_heatmap_from_screen_pts(pt, res, sigma, thres_sigma_times=3):
+    """
+    Pytorch code to generate heatmaps from point. Points with values less than
+    thres are made 0
+    :type pt: torch.FloatTensor of size (num_pt, 2)
+    :type res: int or (int, int)
+    :param sigma: the std of the gaussian distribition. if it is -1, we
+        generate a hm with one hot vector
+    :type sigma: float
+    :type thres: float
+    """
+    num_pt, x = pt.shape
+    assert x == 2
+    assert sigma > 0
+
+    if isinstance(res, int):
+        resx = resy = res
+    else:
+        resx, resy = res
+
+    _hmx = torch.arange(0, resy).to(pt.device)
+    _hmx = _hmx.view([1, resy]).repeat(resx, 1).view([resx, resy, 1])
+    _hmy = torch.arange(0, resx).to(pt.device)
+    _hmy = _hmy.view([resx, 1]).repeat(1, resy).view([resx, resy, 1])
+    hm = torch.cat([_hmx, _hmy], dim=-1)
+    hm = hm.view([1, resx, resy, 2]).repeat(num_pt, 1, 1, 1) # one HxW heatmap for each point?
+
+    pt = pt.view([num_pt, 1, 1, 2])
+    hm = torch.exp(-1 * torch.sum((hm - pt) ** 2, -1) / (2 * (sigma**2))) # RBF Kernel
+    thres = np.exp(-1 * (thres_sigma_times**2) / 2) # truncated
+    hm[hm < thres] = 0.0
+
+    hm /= torch.sum(hm, (1, 2), keepdim=True) + 1e-6 # normalization
+    return hm # (n_pt, h, w)
 
 def augment(item):
     action = item['action']
@@ -221,22 +267,40 @@ class ARPolicy(BaseImagePolicy):
         #region arp ########################################################
         self.use_sample = arp_cfg.get('sample', True)
         self.augment_ratio = arp_cfg.get('augment_ratio', 0.0)
+        self.plan_steps = arp_cfg.get('plan_steps', 5)
+        self.plan_dict_size = arp_cfg.get('plan_dict_size', 100)
+        self.plan_upscale_ratio = arp_cfg.get('plan_upscale_ratio', 8)
+        self.low_var_eval = arp_cfg.get('low_var_eval', True)
+        self.num_latents = arp_cfg.get('num_latents', 1)
+        self.reverse_plan = arp_cfg.get('reverse_plan', False)
 
-        self.action_chunk_size = arp_cfg.get('action_chunk_size', 1)
+        self.plan_chunk_size = arp_cfg.get('plan_chunk_size', 1)
+        self.action_chunk_size = arp_cfg.get('action_chunk_size', horizon)
+
+        image_shape = obs_shape_meta['image']['shape']
+        self.image_shape = image_shape
+        plan_attn_size = image_shape[-1] // self.plan_upscale_ratio
 
         self.policy = arp.AutoRegressivePolicy(arp.ModelConfig(
             n_embd=arp_cfg['n_embd'],
             embd_pdrop=arp_cfg['embd_pdrop'],
             layer_norm_every_block=arp_cfg.get('layer_norm_every_block', True),
-            max_chunk_size=self.horizon * 2,
-            max_seq_len=self.horizon * 2,
+            max_chunk_size=horizon if self.plan_chunk_size > 0 else (horizon + self.plan_steps),
+            max_seq_len=(self.n_obs_steps + self.plan_steps + self.horizon) * 2,
             layers=[arp.LayerType.make(
                     **arp_cfg['layer_cfg'],
                     condition_on='visual-token'
                 )] * arp_cfg['num_layers'],
             tokens=[
-                arp.TokenType.make(name='x', dim=1, is_continuous=True, embedding='discrete', dict_sizes=[100], bounds=[-1, 1], predictor='gmm', predictor_kwargs={'num_latents': 4, 'low_var_eval': False}),
-                arp.TokenType.make(name='y', dim=1, is_continuous=True, embedding='discrete', dict_sizes=[100], bounds=[-1, 1], predictor='gmm', predictor_kwargs={'num_latents': 4, 'low_var_eval': False})
+                arp.TokenType.make(name='pos', dim=2, is_continuous=True, embedding='linear', is_control=True),
+
+                arp.TokenType.make(name='coarse-plan', is_continuous=True, dim=2, 
+                                embedding='position_2d', predictor="upsample_from_2d_attn", 
+                                predictor_kwargs={'attn_with': (arp_cfg['n_embd'], plan_attn_size, plan_attn_size), 
+                                                  'upscale_ratio': self.plan_upscale_ratio, 'label_name': 'smooth-heatmap', 
+                                                  'corr_dim': arp_cfg.get('plan_corr_dim', -1)}),
+
+                arp.TokenType.make(name='fine-action', dim=2, is_continuous=True, embedding='linear', predictor='gmm', predictor_kwargs={'num_latents': self.num_latents, 'low_var_eval': self.low_var_eval}),
             ]
         ))
 
@@ -306,9 +370,15 @@ class ARPolicy(BaseImagePolicy):
             label_actions = None
         #endregion ########################################
 
-        future_tk_types = ['x', 'y'] * self.horizon      
-        future_chk_ids = segmented_range_list(0, self.horizon * 2, self.action_chunk_size)
-        future_tk_chk_ids = [{'tk_id': self.policy.token_name_2_ids[tk_type], 'chk_id': chk_id} for chk_id, tk_type in zip(future_chk_ids, future_tk_types)]       
+        future_tk_types = ['coarse-plan'] * self.plan_steps + ['fine-action'] * self.horizon      
+
+        if self.plan_chunk_size > 0:
+            plan_chk_ids = segmented_range_list(self.n_obs_steps, self.n_obs_steps + self.plan_steps, self.plan_chunk_size)
+            action_chk_ids = segmented_range_list(max(plan_chk_ids) + 1, max(plan_chk_ids) + 1 + self.horizon, self.action_chunk_size)
+            future_chk_ids = plan_chk_ids + action_chk_ids
+        else:
+            future_chk_ids = [self.n_obs_steps] * (self.plan_steps + self.horizon)
+        future_tk_chk_ids = [{'tk_id': self.policy.token_name_2_ids[tk_type], 'chk_id': chk_id} for tk_type, chk_id in zip(future_tk_types, future_chk_ids)]
 
         # region: feature preparation & model inference
         this_nobs = dict_apply(nobs, 
@@ -319,17 +389,46 @@ class ARPolicy(BaseImagePolicy):
 
         if training:
             # NOTE sequence preparation
-            tk_vals = label_actions.flatten(1).unsqueeze(-1)
-            tk_names = future_tk_types
+            action_BCL = label_actions.permute(0, 2, 1) # (bs, 2, L)
+            coarse_plan_BCL = F.interpolate(action_BCL, size=self.plan_steps, mode='linear', align_corners=self.plan_steps >= 3)
+            coarse_plans = coarse_plan_BCL.permute(0, 2, 1) # (bs, L, 2)
+            if self.reverse_plan:
+                coarse_plans = torch.flip(coarse_plans, [1])
+            
+            half_img_size = self.image_shape[1] // 2
+            coarse_plans *= half_img_size
+            coarse_plans += half_img_size
+            coarse_plans.clamp_(0, 2 * half_img_size - 1)
+            coarse_plans.round_()
+
+            smooth_heatmap = generate_heatmap_from_screen_pts(coarse_plans.flatten(0, 1), self.image_shape[1:], 
+                                sigma=1, thres_sigma_times=3).reshape(batch_size, coarse_plans.size(1), *self.image_shape[1:])
+                
+            # NOTE: visualize        
+            # VIS_ID = 0
+            # hm_img = to_pil_image(to_red_heatmap(smooth_heatmap[VIS_ID]).sum(dim=0))
+            # img = to_pil_image(denorm_rgb(nobs['image'][VIS_ID,1]))
+            # Image.blend(img, hm_img, 0.5).save('./outputs/test.jpg')
+
+
+            tk_vals = torch.cat([nobs['agent_pos'][:, :self.n_obs_steps], coarse_plans, label_actions], dim=1)
+            tk_names = ['pos'] * self.n_obs_steps + future_tk_types
             tk_types = torch.as_tensor([self.policy.token_name_2_ids[tname] for tname in tk_names]).reshape(1, -1, 1).repeat(batch_size, 1, 1).to(dev)
             seq = torch.cat([tk_vals, tk_types], dim=-1)
-            loss_dict = self.policy.compute_loss(seq, contexts={'visual-token': nobs_features}) # the 1 is for control bit
+
+            loss_dict = self.policy.compute_loss(seq, chk_ids=torch.as_tensor(list(range(self.n_obs_steps)) + future_chk_ids).to(dev),
+                                                 contexts={'visual-token': nobs_features, 'smooth-heatmap': smooth_heatmap.flatten(0, 1)}) # the 1 is for control bit
             return loss_dict
         else:
             # NOTE sequence preparation
-            seq = torch.zeros([batch_size, 0, 2], device=dev)
+            tk_vals = nobs['agent_pos'][:, :self.n_obs_steps]
+            tk_names = ['pos'] * self.n_obs_steps
+            tk_types = torch.as_tensor([self.policy.token_name_2_ids[tname] for tname in tk_names]).reshape(1, -1, 1).repeat(batch_size, 1, 1).to(dev)
+            seq = torch.cat([tk_vals, tk_types], dim=-1)
+
             action_pred = self.policy.generate(seq, future_tk_chk_ids, contexts={'visual-token': nobs_features}, sample=self.use_sample)
-            action_pred = action_pred[..., 0].reshape(-1, self.horizon, 2)
+            start = seq.size(1) + self.plan_steps
+            action_pred = action_pred[:, seq.size(1) + self.plan_steps:, :-1] 
 
             # region de-normalization
             action_pred *= 256.

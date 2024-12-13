@@ -37,7 +37,7 @@ from utils.layers import (
     FixedPositionalEncoding
 )
 
-from arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
+from arp.arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
 #
 from data4robotics import load_vit
 vit_transform, vit_model = load_vit()
