@@ -162,6 +162,7 @@ class MultiViewTransformer(nn.Module):
                 use_fast=self.use_xformers,
             ),
         )
+        # TODO：这里的ffn
         get_attn_ff = lambda: PreNorm(self.attn_dim, FeedForward(self.attn_dim))
         # self-attention layers
         self.layers = nn.ModuleList([])

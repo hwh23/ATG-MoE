@@ -23,6 +23,9 @@ def flatten_img_pc_to_points(obs, pcd):
     bs = obs[0][0].shape[0]
     # concatenating the points from all the cameras
     # (bs, num_points, 3)
+    # 使用 permute 方法改变维度顺序，使高度和宽度成为中间维度，通道数（这里是3，对应x,y,z坐标）成为最后一维。
+    # 使用 reshape 方法将每个点云转换成形状为 [batch_size, num_points, 3] 的张量，其中 num_points 是点的数量。
+    # 最后使用 torch.cat 沿着第二个维度（即点的数量维度）连接所有点云，得到一个合并后的点云张量
     pc = torch.cat([p.permute(0, 2, 3, 1).reshape(bs, -1, 3) for p in pcd], 1)
     _img_feat = [o[0] for o in obs]
     img_dim = _img_feat[0].shape[1]
