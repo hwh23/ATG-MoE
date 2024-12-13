@@ -173,7 +173,7 @@ class ChunkTransformerLayer(nn.Module):
         # TODO：可能的前馈网络位置
         self.is_moe = is_moe
         if is_moe:
-            from utils_with_rlbench import TASK_TO_ID
+            from arp.rlb.utils_with_rlbench import TASK_TO_ID
             self.propagate = TaskMoE(input_size=hidden_size,
                            head_size=mlp_hidden_dim,
                            num_experts=8,
