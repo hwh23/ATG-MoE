@@ -156,3 +156,16 @@ rlb/point-renderer
 real-robot/outputs
 real-robot/weights
 real-robot/data
+
+cuda_12.3.2_545.23.08_linux.run
+
+# ignore the training logs etc
+release/
+
+# ignore all zip files
+*.tar.gz
+*.zip
+
+# ignore test file
+test.py
+rlb/test_hwh.py
