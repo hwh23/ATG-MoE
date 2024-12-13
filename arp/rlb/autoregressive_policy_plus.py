@@ -129,7 +129,10 @@ class PolicyNetwork(nn.Module):
                 LayerType.make(n_head=8, AdaLN=True, condition_on='visual-tokens', name='cross')
             ] * 4 + [
                 LayerType.make(n_head=8, name='self')
-            ] * 6
+            ] * 6,
+            
+            is_moe=False,
+            
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
         
