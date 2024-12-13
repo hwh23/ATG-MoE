@@ -21,6 +21,14 @@ import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp
 import numpy as np
 import torch.distributions as D
+
+import sys
+print(sys.path)
+# Add the directory containing `moe` to sys.path
+sys.path.insert(0, '/opt/data/private/arp')
+print(sys.path)
+
+from moe import TaskMoE
 ##
 
 #region Chunk Transformer Layer
@@ -79,6 +87,7 @@ class Attention(nn.Module):
             qkvs.append([q,k,v])
         
         (q_star, k_star, v_star), (q_hat, k_hat, v_hat) = qkvs
+        # TODO: VAR mask 可以在这里改
         (mask_star, mask_hat), mask_causal = [~m for m in attn_masks], torch.tril(torch.ones(T, T, device=dev))[None, None, ...] == 0
 
         def mlp(y):
@@ -151,15 +160,36 @@ class Attention(nn.Module):
 class ChunkTransformerLayer(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mlp_dropout=0.1,
                  attn_kwargs={}, cond_attn_kwargs={},
-                 conditional=False, AdaLN=False, norm_before_AdaLN=False):
+                 conditional=False, AdaLN=False, norm_before_AdaLN=False,
+                 is_moe:bool=False, # Added boolean to use moe to replace Mlp(FFN)
+                 ):
         super().__init__()
         self.ln_attn = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
         self.ln_mlp = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
-                       drop=mlp_dropout)
+        
+        # TODO：可能的前馈网络位置
+        self.is_moe = is_moe
+        if is_moe:
+            from utils_with_rlbench import TASK_TO_ID
+            self.propagate = TaskMoE(input_size=hidden_size,
+                           head_size=mlp_hidden_dim,
+                           num_experts=8,
+                           k=2,
+                           w_MI=0,
+                           w_H=0,
+                           w_finetune_MI=0,
+                           limit_k=0,
+                           w_topk_loss=0,
+                           task_num=len(TASK_TO_ID),
+                           noisy_gating=False,
+                        )
+        else:
+            self.propagate = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
+                        drop=mlp_dropout)
+            
         self.attn = Attention(hidden_size, num_heads, **attn_kwargs)
         
         self.conditional = conditional
@@ -184,16 +214,16 @@ class ChunkTransformerLayer(nn.Module):
         """
         chunk_ids: (B | 1, L) chunk ids, starting from 0, and ordered
         """
-        m_star = chunk_ids[:, :, None] > chunk_ids[:, None, :]
-        m_hat = chunk_ids[:, :, None] == chunk_ids[:, None, :]
+        m_star = chunk_ids[:, :, None] > chunk_ids[:, None, :] # 用于确保每个块只能关注它之前的所有块，而不能关注它之后的块，这有助于保持因果关系。
+        m_hat = chunk_ids[:, :, None] == chunk_ids[:, None, :] # 用于允许同一个块内的自注意力，即块内的所有位置都可以相互关注。
         return m_star, m_hat
 
     @staticmethod
     def eval_attn_mask(chunk_ids):
         L = chunk_ids.size(1)
-        prompt = chunk_ids[:, -1:] # (B, 1)
+        prompt = chunk_ids[:, -1:] # (B, 1)，最后一个块的id
         m = (chunk_ids[:, :, None] == prompt[:, None, :]).repeat(1, 1, L)
-        m = m | (torch.tril(torch.ones(L, L, device=chunk_ids.device))[None, ...] == 1)
+        m = m | (torch.tril(torch.ones(L, L, device=chunk_ids.device))[None, ...] == 1) # 使用 torch.tril 创建一个下三角矩阵，表示每个位置只能关注到它之前的位置或自身
         return m
     
     @staticmethod
@@ -209,29 +239,48 @@ class ChunkTransformerLayer(nn.Module):
             mask = mask & (~mask_)
         return mask
 
-    def forward_train(self, xs, c, masks, dependency_attn_mask=None):
+    def forward_train(self, xs, c, masks, dependency_attn_mask=None, task_ids:Tensor=None):
         """
         xs: [(B, T, C), (B, T, C)] 
         masks: [(B | 1, T, T), (B | 1, T, T)]
         """
         is_conditional = self.conditional and c is not None
         cond_attns = [self.cond_attn(self.norm_cond(x), c) if is_conditional else 0 for x in xs]
+        aux_losses=None
         if self.AdaLN and is_conditional:
             if self.norm_before_AdaLN:  cond_attns = [self.ln_ada(cond_attn) for cond_attn in cond_attns]
             gates = [self.adaLN_modulation(cond_attn).chunk(6, dim=-1) for cond_attn in cond_attns]
             ys = self.attn.forward_interleave([modulate(self.ln_attn(x), shift_msa, scale_msa)
                   for x, (shift_msa, scale_msa, _, _, _, _) in zip(xs, gates)], masks, dependency_attn_mask=dependency_attn_mask)
             xs = [x + gate_msa * y for x, y, (_, _, gate_msa, _, _, _) in zip(xs, ys, gates)]
-            xs = [x + gate_mlp * self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
-                  for x, (_, _, _, shift_mlp, scale_mlp, gate_mlp) in zip(xs, gates)]
+            
+            xs_tmp, aux_losses = [], []
+            for x, (_, _, _, shift_mlp, scale_mlp, gate_mlp) in zip(xs, gates):
+                if self.is_moe:
+                    propagate_result, aux_loss = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
+                    aux_losses.append(aux_loss)
+                else:
+                    propagate_result = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
+                xs_tmp.append(x + gate_mlp * propagate_result)
+            xs = xs_tmp
         else:
             xs = [x + cond_attn for x, cond_attn in zip(xs, cond_attns)]
             ys = self.attn.forward_interleave([self.ln_attn(x) for x in xs], masks, dependency_attn_mask=dependency_attn_mask)
             xs = [x + y for x, y in zip(xs, ys)]
-            xs = [x + self.mlp(self.ln_mlp(x)) for x in xs]
-        return xs
+            # xs = [x + self.propagate(self.ln_mlp(x)) for x in xs]
+            
+            xs_tmp, aux_losses = [], []
+            for x in xs:
+                if self.is_moe:
+                    propagate_result, aux_loss = self.propagate(self.ln_mlp(x), task_ids)
+                    aux_losses.append(aux_loss)
+                else:
+                    propagate_result = self.propagate(self.ln_mlp(x))
+                xs_tmp.append(x + propagate_result)
+            xs = xs_tmp
+        return xs, torch.stack(aux_losses)
     
-    def forward_inference(self, x, c, mask=None):
+    def forward_inference(self, x, c, mask=None, task_ids:Tensor=None):
         """
         x: (B, T, C) input sequence
         c: (B, L, C) context sequence
@@ -243,11 +292,18 @@ class ChunkTransformerLayer(nn.Module):
             if self.norm_before_AdaLN: cond_attn = self.ln_ada(cond_attn)
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(cond_attn).chunk(6, dim=-1)
             x = x + gate_msa * self.attn(modulate(self.ln_attn(x), shift_msa, scale_msa), attn_mask=mask)
-            x = x + gate_mlp * self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
+            if self.is_moe:
+                x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
+            else:
+                x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
         else:
             x = x + cond_attn
             x = x + self.attn(self.ln_attn(x), attn_mask=mask)
-            x = x + self.mlp(self.ln_mlp(x))
+            if self.is_moe:
+                x = x + self.propagate(self.ln_mlp(x), task_ids)
+            else:
+                x = x + self.propagate(self.ln_mlp(x))
+                
         return x
 
 #endregion #######################
@@ -1103,7 +1159,7 @@ class AutoRegressivePolicy(nn.Module):
     def forward(self, embs: Union[Tensor, Tuple[Tensor, Tensor]], chk_ids: Tensor, 
                 layer_ids: Optional[List[int]]=None, contexts: Dict[str, Tensor]={}, 
                 dependency_attn_mask: Optional[Tensor]=None, 
-                training: bool=None):
+                training: bool=None, task_ids:Tensor=None):
         if layer_ids is None: layer_ids = list(range(len(self.blocks)))
         if training is None: training = self.training
         if training: dev, (bs, L) = embs[0].device, embs[0].shape[:2]
@@ -1116,7 +1172,7 @@ class AutoRegressivePolicy(nn.Module):
             for layer_id in layer_ids:
                 block: ChunkTransformerLayer = self.blocks[layer_id]
                 cond = contexts[block.conditional] if block.conditional else None
-                embs = block.forward_train(embs, cond, train_masks, dependency_attn_mask=dependency_attn_mask)
+                embs, aux_loss = block.forward_train(embs, cond, train_masks, dependency_attn_mask=dependency_attn_mask, task_ids=task_ids)
                 if self.cfg.layer_norm_every_block:
                     embs = [self.layer_norms[layer_id](e) for e in embs] 
             if not self.cfg.layer_norm_every_block:
@@ -1129,18 +1185,19 @@ class AutoRegressivePolicy(nn.Module):
             for layer_id in layer_ids:
                 block: ChunkTransformerLayer = self.blocks[layer_id]
                 cond = contexts[block.conditional] if block.conditional else None
-                embs = block.forward_inference(embs, cond, eval_mask)
+                embs = block.forward_inference(embs, cond, eval_mask, task_ids)
                 if self.cfg.layer_norm_every_block:
                     embs = self.layer_norms[layer_id](embs)        
             if not self.cfg.layer_norm_every_block:
                 embs = self.final_ln(embs)
-        return embs
+        return embs, aux_loss
 
     def compute_loss(self, tks: Tensor, chk_ids: Optional[Tensor]=None, valid_tk_mask: Tensor=None, 
                      skip_tokens: List[int] = [], 
                      block_attn_directions: AttnDirectionsType=[],
                      match_layer: str = "",
-                     contexts: Dict[str, Tensor]={}, log_prob=False):
+                     contexts: Dict[str, Tensor]={}, log_prob=False,
+                     task_ids:Tensor = None):
         """
         tks: (bs, L, d+1), where d = max(dims of all actions), the last dimension is tk_ids
         tk_ids: (bs, L)
@@ -1158,7 +1215,7 @@ class AutoRegressivePolicy(nn.Module):
         if len(chk_ids.shape) == 1: chk_ids = chk_ids[None, ...]
         assert chk_ids.size(1) == tk_ids.size(1), "chunk ids and token should have the same length"
         tk_codes = self.token_coder.encode(tks, tk_ids)
-
+        
         dependency_attn_mask = ChunkTransformerLayer.dependency_attn_mask(tk_ids, 
                     map2(self.f_token_name_2_ids, block_attn_directions)) if block_attn_directions else None
 
@@ -1170,9 +1227,10 @@ class AutoRegressivePolicy(nn.Module):
         else:
             layer_ids = list(range(len(self.blocks)))
 
-        # interleave forward
-        embs_star, embs_hat = self([embs_star, embs_hat], chk_ids, contexts=contexts, layer_ids=layer_ids,
-                                   dependency_attn_mask=dependency_attn_mask, training=True)
+        # interleave forward 
+        # 这里调用了forward
+        (embs_star, embs_hat), aux_loss = self([embs_star, embs_hat], chk_ids, contexts=contexts, layer_ids=layer_ids,
+                                   dependency_attn_mask=dependency_attn_mask, training=True, task_ids=task_ids)
 
         cond_log_probs = torch.zeros(batch_size, tks.shape[1], device=dev) if log_prob else None
         for i in map(int, tk_ids.unique()):
@@ -1195,6 +1253,7 @@ class AutoRegressivePolicy(nn.Module):
                 losses[f'{token["name"]}.{k}'] += v
 
         loss_dict = {k: sum(v) / len(v) for k, v in losses.items()}
+        loss_dict['aux_loss'] = aux_loss
         if log_prob:
             return loss_dict, cond_log_probs
         else:
@@ -1205,7 +1264,7 @@ class AutoRegressivePolicy(nn.Module):
                 sample: bool=False, contexts: Dict[str, PerChunk[Tensor]]={},
                 block_attn_directions: AttnDirectionsType=[],
                 match_layer: PerChunk[str]= "",
-                sample_function: PerChunk[SampleFunctionT]={}):    
+                sample_function: PerChunk[SampleFunctionT]={}, task_ids:Tensor=None):    
         """
         prompt_tks: (bs, L, d+1), where d = max(dims of all actions), the last dimension is tk_ids
         future_tk_chk_ids: list of dict(tk_id, chk_id, tk_val), tk_val is optional and only shall be given for control token 
@@ -1242,6 +1301,7 @@ class AutoRegressivePolicy(nn.Module):
                 next_chunk.append(future_tk_chk_ids.pop(0))
                 curr_tokens.append(self.cfg.tokens[next_chunk[-1]['tk_id']])
             
+            # 初始化 next_tk_codes：为即将生成的新 tokens 创建一个零张量
             next_tk_codes = torch.zeros(batch_size, len(next_chunk), tk_codes.size(-1), device=dev, dtype=tk_codes.dtype)
 
             next_chk_ids = torch.as_tensor([v['chk_id'] for v in next_chunk], device=dev)[None, :]
@@ -1249,30 +1309,38 @@ class AutoRegressivePolicy(nn.Module):
             next_tk_ids = torch.as_tensor(next_tk_ids_lst, device=dev, dtype=tk_ids.dtype)[None, :].repeat(batch_size, 1)
             chk_ids = torch.cat([chk_ids, next_chk_ids], dim=1)
 
+            # 控制 tokens 处理：如果所有 tokens 都是控制 tokens，则直接设置它们的值并跳过模型预测。
             if all([curr_token.get('is_control', False) for curr_token in curr_tokens]): 
                 next_tk_codes[:, :, :1] = torch.as_tensor([v['tk_val'] for v in next_chunk], device=dev)[None, :, None]
                 tk_codes = torch.cat([tk_codes, next_tk_codes], dim=1)
                 tk_ids = torch.cat([tk_ids, next_tk_ids], dim=1)
                 continue
-
+            
+            # 过滤上下文：根据当前 chunk ID 筛选出相关的上下文信息。
             chk_contexts = self.filter_context(curr_chk_id, contexts)
 
+            # 嵌入转换：将现有的 token 编码转换为嵌入表示，并为新 chunk 创建嵌入。
             prompt_embs = self.token_codes_to_embeddings(tk_codes, tk_ids, **chk_contexts)
             chunk_embs = self.chunk_embedder(next_chk_ids, next_tk_ids)
             embs = torch.cat([prompt_embs, chunk_embs], dim=1) 
 
+            # 确定层 ID：根据匹配规则选择要使用的 Transformer 层。
             match_layer_ = match_layer if isinstance(match_layer, str) else match_layer.get(curr_chk_id, "")
             if match_layer_:
                 layer_ids = [i for i, ln in enumerate(self.cfg.layers) if match_layer in ln['name']]
             else:
                 layer_ids = list(range(len(self.blocks)))
-
+            
+            # 构建依赖关系注意力掩码：根据指定的注意力方向构建掩码。
             dependency_attn_mask = ChunkTransformerLayer.dependency_attn_mask(torch.cat([tk_ids, next_tk_ids], dim=1), 
                                                                               map2(self.f_token_name_2_ids, block_attn_directions)) if block_attn_directions else None
+            # 这里用了forward
             embs = self(embs, chk_ids, contexts=chk_contexts, layer_ids=layer_ids,
-                        dependency_attn_mask=dependency_attn_mask, training=False)
+                        dependency_attn_mask=dependency_attn_mask, training=False, task_ids=task_ids)
+            # 截取嵌入表示：只保留当前 chunk set 的嵌入表示。
             embs = embs[:, -len(next_chunk):, :] # the current chunk set
 
+            # 预测输出：对于每个 unique token ID，使用 token_predictors 根据模型输出预测下一个 token 的值。
             predicts = [None] * len(next_tk_ids_lst)
             for tk_id_key, _ in itertools.groupby(next_tk_ids_lst):
                 _indices = [_i for _i, v in enumerate(next_tk_ids_lst) if v == tk_id_key]
@@ -1282,7 +1350,7 @@ class AutoRegressivePolicy(nn.Module):
                     for _i, _ind in enumerate(_indices): predicts[_ind] = predict_output[:, _i]
                 else:
                     for _i, _ind in enumerate(_indices): predicts[_ind] = predict_output[_i]
-            
+            # 样本选择：根据提供的 sample_function 或默认逻辑选择最终的 token 值。
             if callable(sample_function):
                 next_tk_codes = sample_function(predicts)
             elif curr_chk_id in sample_function:
@@ -1301,6 +1369,8 @@ class AutoRegressivePolicy(nn.Module):
                     start += count
 
                 next_tk_codes = cat_uneven_blc_tensors(*next_tk_codes)
+                
+            # 更新 tk_codes 和 tk_ids：将新生成的 token 编码和 ID 更新到总序列中。
             tk_codes = cat_uneven_blc_tensors(tk_codes, next_tk_codes)
             tk_ids = torch.cat([tk_ids, next_tk_ids], dim=1)
         return to_seq(tk_codes, tk_ids)

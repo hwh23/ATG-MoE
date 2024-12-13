@@ -23,7 +23,7 @@ from utils.structure import *
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import Dataset, DataLoader, RandomSampler
 from rlbench.backend.const import DEPTH_SCALE
-
+from utils_with_rlbench import TASK_TO_ID
 
 def get_demo_essential_info(data_path, episode_ind):
     EPISODE_FOLDER = 'episode%d'
@@ -158,13 +158,15 @@ class TransitionDataset(Dataset):
                 batch_num: int=1000, batch_size: int=6, scene_bounds=[-0.3,-0.5,0.6,0.7,0.5,1.6],
                 voxel_size:int=100, rotation_resolution:int=5, cached_data_path=None,
                 origin_style_state=True,
-                episode_length=25, time_in_state=False, k2k_sample_ratios={}, o2k_window_size=10):
+                episode_length=25, time_in_state=False, k2k_sample_ratios={}, o2k_window_size=10,
+                shuffle:bool=False):
         super().__init__()
         self._num_batches = batch_num
         self._batch_size = batch_size
         self.tasks = tasks
         self.cameras = cameras
         self.origin_style_state = origin_style_state
+        self.shuffle=shuffle
         if not origin_style_state:
             assert not time_in_state, "should not include a discrete timestep in state"
 
@@ -262,7 +264,7 @@ class TransitionDataset(Dataset):
                 "frame_idx": obs_frame_id,
                 "episode_idx": episode_idx,
                 "variation_idx": variation_id,
-                "task_idx": self.tasks.index(task),
+                "task_idx": TASK_TO_ID[task],
 
                 "gripper_pose": essential_kp_obs.gripper_pose,
                 "ignore_collisions": int(essential_kp_obs.ignore_collisions),
@@ -291,7 +293,7 @@ class TransitionDataset(Dataset):
 
     def dataloader(self, num_workers=1, pin_memory=True, distributed=False, pin_memory_device=''):
         if distributed:
-            sampler = DistributedSampler(self)
+            sampler = DistributedSampler(self, shuffle=self.shuffle)
         else:
             sampler = RandomSampler(range(len(self)))
         if pin_memory and pin_memory_device != '':

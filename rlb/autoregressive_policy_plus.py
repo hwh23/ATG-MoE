@@ -300,6 +300,7 @@ class PolicyNetwork(nn.Module):
         pc, img_feat = clamp_pc_in_bound(pc, img_feat, self.scene_bounds, skip=not self.move_pc_in_bound)
         pc_new, rev_trans_stage1, waypoint_stage1 = [], [], []
 
+        # Prepare point clouds for Stage 1 by centering them within a cube
         for i, _pc in enumerate(pc):
             a, b = place_pc_in_cube(_pc,
                 with_mean_or_bounds=self._place_with_mean,
@@ -312,9 +313,12 @@ class PolicyNetwork(nn.Module):
                 )[0].unsqueeze(0))
             pc_new.append(a)
             rev_trans_stage1.append(b)
+        # 缩放后的pc
         pc = pc_new
         bs = len(pc)
 
+        # Combine waypoints and apply noise augmentation during training
+        # TODO: x+=noise才会改变原来的元素
         if self.training:
             waypoint_stage1 = torch.cat(waypoint_stage1, axis=0).clone().detach()
             if self.point_augment_noise != 0:
@@ -324,17 +328,25 @@ class PolicyNetwork(nn.Module):
                         noise = stdv * ((2 * torch.rand(*x.shape, device=x.device)) - 1)
                         x = x + noise
 
+        # Render noisy visual features for Stage 1
         img = self.render(pc, img_feat, self.mvt1)
         #endregion ###########################
 
+        #  extracts visual feature maps
         visual_featmap_1 = self.mvt1(img=img, proprio=proprio, lang_emb=lang_goal_embs) # [B, num_cameras, 128, np, np]
 
+        #region Stage 1
         if self.training:
+            # Generate ground truth spatial heatmap
             smooth_spatial_label_stage1, screen_waypoint_stage1 = self.get_gt_translation_action(waypoint_stage1, dims=(bs, nc, h, w))
             stage1_chk_ids = torch.as_tensor([0], device=dev)[None, :]
 
             # the 0, 0 are dummy input
             seq = torch.as_tensor([0, 0, self.policy.token_name_2_ids['stage1-screen-pts']], device=dev).reshape(1, 1, 3).repeat(bs, 1, 1)
+            
+            # Compute loss for each camera view 
+            # between noisy visual feature map visual_featmap_1 (this featmap generated from noisy img_feat)
+            # and ground truth smooth_spatial_label_stage1 
             tmp_loss_dict = defaultdict(list)
             for view_id in range(3):
                 _loss_dict = self.policy.compute_loss(seq, stage1_chk_ids, match_layer='cross',
@@ -342,12 +354,15 @@ class PolicyNetwork(nn.Module):
                                 'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                 'visual-featmap': visual_featmap_1[:, view_id],
                                 'smooth-heatmap': smooth_spatial_label_stage1[:, :, view_id]
-                            })
+                            },
+                            task_ids=observation['task_idx'])
                 for k, v in _loss_dict.items():
                     tmp_loss_dict[k].append(v)
             
+            # Combine losses for Stage 1 with mean
             loss_dicts.append({k: sum(v) / len(v) for k, v in tmp_loss_dict.items()})
         else:
+            # Inference: Generate waypoint predictions for Stage 1
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage1-screen-pts'])]
 
@@ -357,26 +372,36 @@ class PolicyNetwork(nn.Module):
                                     contexts={
                                             'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_1[:, view_id],
-                                    })
+                                    },
+                                    task_ids=observation['task_idx'])
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
                              for hm_logits in self.spatial_logits_buffer], dim=1)
+            
+            # predict the 3d point in a cube
             pred_pt = [self.renderer.get_most_likely_point_3d(hms[i : i + 1]) for i in range(bs)]
             waypoint_stage1 = torch.cat(pred_pt, 0) # bs, 3
             self.spatial_logits_buffer.clear()
+        #endregion
 
+        #region Stage 2
         with torch.no_grad():
             if self.training:
+                # Add uniform noise on groundtruth waypoint 
+                # and transform it to point clouds
                 waypoint_stage1_noisy = add_uniform_noise(
                     waypoint_stage1.clone().detach(), 2 * self.stage2_waypoint_label_noise
                 )
+                # 把pc从cube大小放大到self.stage2_zoom_scale
                 pc, rev_trans_stage2 = transform_pc(pc, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
+                # 把gt 轨迹放到加噪后的轨迹的中心点,并且放大到self.stage2_zoom_scale
                 waypoint_stage2, _ = transform_pc(waypoint_stage1, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
             else:
+                # Transform the way point predicted from stage1
                 pc, rev_trans_stage2 = transform_pc(pc, loc=waypoint_stage1, sca=self.stage2_zoom_scale)
                 waypoint_stage1_noisy = waypoint_stage1
                 waypoint_stage2 = None
-
+        # Render visual features for Stage 2. Same img_feat but with mvt2
         img = self.render(pc, img_feat, self.mvt2)
         visual_featmap_2 = self.mvt2(img=img, proprio=proprio, lang_emb=lang_goal_embs)
 
@@ -388,7 +413,8 @@ class PolicyNetwork(nn.Module):
                 action_grip,       # (bs)
                 action_collision,  # (bs)
             ) = [v.argmax(-1) for v in self.get_gt_rot_grip_collision(bs, action_rot, action_grip, action_ignore_collisions, device=dev)]
-
+            
+            # Add rotation noise if needed
             if self.rotation_aug:
                 rotation_aug = torch.from_numpy(np.random.choice(self.rotation_aug[0], p=self.rotation_aug[1], size=(bs, 3))).to(dev)
                 action_rot_aug_x = action_rot_x + rotation_aug[:, 0]
@@ -406,19 +432,23 @@ class PolicyNetwork(nn.Module):
             stage2_chk_ids = torch.as_tensor([0], device=dev)[None, :]
             seq = torch.as_tensor([0, 0, self.policy.token_name_2_ids['stage2-screen-pts']], device=dev).reshape(1, 1, 3).repeat(bs, 1, 1)
             tmp_loss_dict = defaultdict(list)
+            
+            # compute cross entropy loss for visual feature map2
             for view_id in range(3):
                 _loss_dict = self.policy.compute_loss(seq, stage2_chk_ids, match_layer='cross',
                             contexts={
                                 'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                 'visual-featmap': visual_featmap_2[:, view_id],
                                 'smooth-heatmap': smooth_spatial_label_stage2[:, :, view_id]
-                            })
+                            },
+                            task_ids=observation['task_idx'])
                 for k, v in _loss_dict.items():
                     tmp_loss_dict[k].append(v)
             loss_dicts.append({k: sum(v) / len(v) for k, v in tmp_loss_dict.items()})
 
             # ------------------------------------------- #
-
+            
+            # compute gripper loss
             prompt_features = torch.cat([ # [bs, 6, 128]
                     grid_sample_from_heatmap(screen_waypoint_stage2.reshape(-1, 1, 2) / self.img_patch_size, 
                                             visual_featmap_2.flatten(0, 1))[0].reshape(bs, -1, 128),
@@ -443,9 +473,11 @@ class PolicyNetwork(nn.Module):
                                                             'prompt-features': prompt_features,
                                                             'rot-x': action_rot_x[:, None],
                                                             'rot-y': action_rot_y[:, None], 'rot-z': action_rot_z[:, None]
-                                                         })
+                                                         },
+                                                         task_ids=observation['task_idx'])
             loss_dicts.append(loss_dict_gripper)
         else:
+            # Generate future waypoint from prompt
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage2-screen-pts'])]
             for view_id in range(3):
@@ -453,7 +485,8 @@ class PolicyNetwork(nn.Module):
                                     contexts={
                                             'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_2[:, view_id],
-                                    })
+                                    },
+                                    task_ids=observation['task_idx'])
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
 
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
@@ -478,8 +511,12 @@ class PolicyNetwork(nn.Module):
                                                     sample=False,  block_attn_directions=self.block_attn_directions,  
                                                     contexts={
                                                         'prompt-features': prompt_features
-                                                    })
-
+                                                    },
+                                                    task_ids=observation['task_idx'])
+        #endregion
+        
+        #region final output
+        # Get loss dictionary when training, get action when inferencing
         if self.training:
             loss_dict = {}
             for d in loss_dicts: loss_dict.update(d)
@@ -488,6 +525,7 @@ class PolicyNetwork(nn.Module):
                     'v1_norm': norm(visual_featmap_1.flatten(0, 1)),
                     'v2_norm': norm(visual_featmap_2.flatten(0, 1))
             }
+            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()
             return loss_dict
         else:
             final_waypoint = rev_trans_stage1[0](rev_trans_stage2(waypoint_stage2))
@@ -502,4 +540,5 @@ class PolicyNetwork(nn.Module):
                 )
             )
             return continuous_action
+        #endregion
         

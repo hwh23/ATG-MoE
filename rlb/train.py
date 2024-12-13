@@ -105,7 +105,8 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
             voxel_size=env_cfg.voxel_size, rotation_resolution=env_cfg.rotation_resolution,
             cached_data_path=cfg.train.cached_dataset_path, time_in_state=cfg.env.time_in_state,
             episode_length=cfg.env.episode_length, k2k_sample_ratios=cfg.train.k2k_sample_ratios, 
-            origin_style_state=cfg.env.origin_style_state)
+            origin_style_state=cfg.env.origin_style_state,
+            shuffle=True)
 
     log("Begin Training...")
     dataloader, sampler = dataset.dataloader(num_workers=cfg.train.num_workers, 
