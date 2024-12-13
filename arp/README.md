@@ -19,19 +19,19 @@ https://github.com/user-attachments/assets/44e7eabf-dfcb-44a9-a47c-d71d653423f7
 
 ## Getting Started
 
-To install, clone this repository and recreate the python environment according to [ENV.md](ENV.md), and download datasets and pretrained models according to [Download.md](Download.md).
+To install, clone this repository and recreate the python environment according to [ENV.md](readme_util/ENV.md), and download datasets and pretrained models according to [Download.md](readme_util/Download.md).
 
 
-- To evaluate or run demonstration with pretrained models, follow the instructions in [Eval.md](Eval.md).
+- To evaluate or run demonstration with pretrained models, follow the instructions in [Eval.md](readme_util/Eval.md).
 
-- To train ARP in Push-T, ALOHA, or RLBench, follow the instructions in [Train.md](Train.md).
+- To train ARP in Push-T, ALOHA, or RLBench, follow the instructions in [Train.md](readme_util/Train.md).
 
 
 ## More Experiments
 
-1. To count MACs and parameters, please check [profile.ipynb](profile.ipynb). 
+1. To count MACs and parameters, please check [profile.ipynb](readme_util/profile.ipynb). 
 
-1. To run baselines and ablation studies, please check [Experiments.md](Experiments.md). We also provide a much cleaner implementation of RVT-2. 
+1. To run baselines and ablation studies, please check [Experiments.md](readme_util/Experiments.md). We also provide a much cleaner implementation of RVT-2. 
 
 2. Please check [real-robot/readme.ipynb](real-robot/readme.ipynb), if you want to learn more about the real robot experiment.
 
@@ -39,12 +39,12 @@ To install, clone this repository and recreate the python environment according 
 
 4. If you look for supplementary video, please check the videos folder in https://rutgers.box.com/s/uzozemx67kje58ycy3lyzf1zgddz8tyq.
 
-5. [arp.py](arp.py) is a single-file implementation of our autoregressive policy. Directly running this file in command line will train an ARP model to generate binary mnist images. 
+5. [arp.py](util/arp.py) is a single-file implementation of our autoregressive policy. Directly running this file in command line will train an ARP model to generate binary mnist images. 
     - The only hairy part of the code is the `generate` function, which is, in principle simple but has some engineering details.
     - Note, action decoder (in paper) are named as predictor in this file.
     - Here are my ongoing [documentation](https://github.com/mlzxy/arp/issues/9). 
 
-6. We provide [2d-waypoints-real-robot.ipynb](https://github.com/mlzxy/arp/blob/main/real-robot/2d-waypoints-real-robot.ipynb), which shows you how to get 2d waypoints or 2d Joint locations (which can be used as guidance for low-level actions), from URDF, camera parameters and joint positions of real robots. 
+6. We provide [2d-waypoints-real-robot.ipynb](real-robot/2d-waypoints-real-robot.ipynb), which shows you how to get 2d waypoints or 2d Joint locations (which can be used as guidance for low-level actions), from URDF, camera parameters and joint positions of real robots. 
 
 
 
