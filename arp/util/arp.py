@@ -246,7 +246,9 @@ class ChunkTransformerLayer(nn.Module):
         """
         is_conditional = self.conditional and c is not None
         cond_attns = [self.cond_attn(self.norm_cond(x), c) if is_conditional else 0 for x in xs]
-        aux_losses=None
+        aux_losses = torch.zeros(size=[len(xs)])
+        x_tmp = [0]*len(xs)
+        
         if self.AdaLN and is_conditional:
             if self.norm_before_AdaLN:  cond_attns = [self.ln_ada(cond_attn) for cond_attn in cond_attns]
             gates = [self.adaLN_modulation(cond_attn).chunk(6, dim=-1) for cond_attn in cond_attns]
@@ -254,31 +256,27 @@ class ChunkTransformerLayer(nn.Module):
                   for x, (shift_msa, scale_msa, _, _, _, _) in zip(xs, gates)], masks, dependency_attn_mask=dependency_attn_mask)
             xs = [x + gate_msa * y for x, y, (_, _, gate_msa, _, _, _) in zip(xs, ys, gates)]
             
-            xs_tmp, aux_losses = [], []
-            for x, (_, _, _, shift_mlp, scale_mlp, gate_mlp) in zip(xs, gates):
+            for i, (x, (_, _, _, shift_mlp, scale_mlp, gate_mlp)) in enumerate(zip(xs, gates)):
                 if self.is_moe:
                     propagate_result, aux_loss = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
-                    aux_losses.append(aux_loss)
+                    aux_losses[i]=aux_loss
                 else:
                     propagate_result = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
-                xs_tmp.append(x + gate_mlp * propagate_result)
-            xs = xs_tmp
+                x_tmp[i] = propagate_result
+            xs = x_tmp
         else:
             xs = [x + cond_attn for x, cond_attn in zip(xs, cond_attns)]
             ys = self.attn.forward_interleave([self.ln_attn(x) for x in xs], masks, dependency_attn_mask=dependency_attn_mask)
             xs = [x + y for x, y in zip(xs, ys)]
-            # xs = [x + self.propagate(self.ln_mlp(x)) for x in xs]
-            
-            xs_tmp, aux_losses = [], []
-            for x in xs:
+            for i, x in enumerate(xs):
                 if self.is_moe:
                     propagate_result, aux_loss = self.propagate(self.ln_mlp(x), task_ids)
-                    aux_losses.append(aux_loss)
+                    aux_losses[i]=aux_loss
                 else:
                     propagate_result = self.propagate(self.ln_mlp(x))
-                xs_tmp.append(x + propagate_result)
-            xs = xs_tmp
-        return xs, torch.stack(aux_losses)
+                x_tmp[i] = propagate_result
+            xs = x_tmp
+        return xs, aux_losses
     
     def forward_inference(self, x, c, mask=None, task_ids:Tensor=None):
         """
@@ -1079,6 +1077,9 @@ class AutoRegressivePolicy(nn.Module):
         self.token_embedders = nn.ModuleList()
         self.token_name_2_ids = {}
         self.f_token_name_2_ids = lambda name: self.token_name_2_ids.get(name, name)
+        
+        self.is_moe = cfg.is_moe
+        
         for tk_id, tk in enumerate(cfg.tokens):
             assert tk['embedding'] in register_token_embedding.map, f"token embedding type: {tk['embedding']} not found!"
             self.token_name_2_ids[tk['name']] = tk_id
@@ -1096,7 +1097,8 @@ class AutoRegressivePolicy(nn.Module):
             layer = ChunkTransformerLayer(
                 cfg.n_embd, layer_cfg['n_head'], mlp_ratio=layer_cfg['mlp_ratio'], mlp_dropout=layer_cfg['mlp_dropout'],
                 attn_kwargs=layer_cfg['attn_kwargs'], cond_attn_kwargs=layer_cfg['cond_attn_kwargs'],
-                conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False)
+                conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False),
+                is_moe=self.is_moe
             )
             self.blocks.append(layer)
 
