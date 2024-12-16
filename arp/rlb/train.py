@@ -19,9 +19,12 @@ from utils.structure import RLBENCH_TASKS
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from runstats import Statistics
+from torch.utils.tensorboard import SummaryWriter
 
 
-def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, rank: int = 0, save_freq: int = 6000, start_step=0, use_wandb=False):
+
+def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, rank: int = 0, save_freq: int = 6000, start_step=0, use_wandb=False,
+          writer: SummaryWriter=None):
     start = time()
     run_stats = {}
     steps = start_step
@@ -37,6 +40,14 @@ def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, ra
         for k in run_stats:
             run_stats[k].push(loss_dict[k])
             stat_dict[k] = run_stats[k].mean()
+        if writer:# add loss dict to tensorboard
+            # writer.add_scalars("losses", loss_dict, steps)
+            for k, v in loss_dict.items():
+                if k=="v1_norm" or k=="v2_norm":
+                    writer.add_scalar(f"stat/{k}", v, steps) 
+                else:                  
+                    writer.add_scalar(f"loss/{k}", v, steps) 
+            
         if i % freq == 0 and rank == 0:
             logger(f"[step:{str(steps).zfill(8)} time:{time()-start:.01f}s] " + " ".join([f"{k}:{v:.04f}" for k, v in sorted(stat_dict.items())]),
                 printer=tqdm.write)
@@ -121,7 +132,8 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
         agent.train()
 
     train(agent, dataloader, log, device, freq=cfg.train.disp_freq, rank=rank, save_freq=cfg.train.save_freq, 
-        start_step=start_step, use_wandb=cfg.wandb and rank == 0)
+        start_step=start_step, use_wandb=cfg.wandb and rank == 0,
+        writer=SummaryWriter(log_dir=cfg.output_dir))
 
 
 @configurable()

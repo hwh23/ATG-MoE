@@ -21,15 +21,8 @@ import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp
 import numpy as np
 import torch.distributions as D
-
-import sys
-print(sys.path)
-# Add the directory containing `moe` to sys.path
-sys.path.insert(0, '/opt/data/private/arp')
-print(sys.path)
-
 from arp.moe import TaskMoE
-##
+
 
 #region Chunk Transformer Layer
 
@@ -162,6 +155,7 @@ class ChunkTransformerLayer(nn.Module):
                  attn_kwargs={}, cond_attn_kwargs={},
                  conditional=False, AdaLN=False, norm_before_AdaLN=False,
                  is_moe:bool=False, # Added boolean to use moe to replace Mlp(FFN)
+                 moe_multiple_gate:bool=False,
                  ):
         super().__init__()
         self.ln_attn = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
@@ -185,6 +179,7 @@ class ChunkTransformerLayer(nn.Module):
                            w_topk_loss=0,
                            task_num=len(TASK_TO_ID),
                            noisy_gating=False,
+                           moe_multiple_gate=moe_multiple_gate,
                         )
         else:
             self.propagate = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
@@ -1078,8 +1073,10 @@ class AutoRegressivePolicy(nn.Module):
         self.token_name_2_ids = {}
         self.f_token_name_2_ids = lambda name: self.token_name_2_ids.get(name, name)
         
+        #region moe properties 
         self.is_moe = cfg.is_moe
-        
+        self.moe_multiple_gate = cfg.moe_multiple_gate
+        #endregion
         for tk_id, tk in enumerate(cfg.tokens):
             assert tk['embedding'] in register_token_embedding.map, f"token embedding type: {tk['embedding']} not found!"
             self.token_name_2_ids[tk['name']] = tk_id
@@ -1098,7 +1095,8 @@ class AutoRegressivePolicy(nn.Module):
                 cfg.n_embd, layer_cfg['n_head'], mlp_ratio=layer_cfg['mlp_ratio'], mlp_dropout=layer_cfg['mlp_dropout'],
                 attn_kwargs=layer_cfg['attn_kwargs'], cond_attn_kwargs=layer_cfg['cond_attn_kwargs'],
                 conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False),
-                is_moe=self.is_moe
+                is_moe=self.is_moe,
+                moe_multiple_gate=self.moe_multiple_gate,
             )
             self.blocks.append(layer)
 

@@ -872,7 +872,7 @@ class Policy:
         assert self._network.training
         with autocast(enabled=self.amp):
             loss_dict = self._network(replay_sample)
-            stat_dict = loss_dict.pop('stat_dict',  {})
+            stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
             total_loss = sum(loss_dict.values())
             self._optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(total_loss).backward()

@@ -165,7 +165,9 @@ release/
 # ignore all zip files
 *.tar.gz
 *.zip
+*.vscode
+weights/
 
 # ignore test file
 test.py
-rlb/test_hwh.py
+arp/rlb/test_hwh.py

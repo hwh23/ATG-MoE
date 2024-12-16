@@ -1,5 +1,5 @@
 import math
-from typing import List
+from typing import List, Union
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,8 @@ import random
 from torch.cuda.amp import custom_fwd, custom_bwd
 from typing import Any, Dict, List, Optional
 from torch import Tensor
+from dataclasses import dataclass
+
 class ParallelLinear(torch.autograd.Function):
 
     @staticmethod
@@ -166,6 +168,122 @@ class ParallelExperts(nn.Module):
         return results
 
 
+
+@dataclass
+class Beta:
+    max_step_size:int
+    max:float= 0.95
+    min:float=0.9
+    step_size:float=0.05 # (max-min)/max_step_size
+    value:float=0.9
+    window_diff_factor:float = 7.0
+    
+    def calculate(self, current_step:int=None, window_diff:float=None)->float:
+        """Calculate the beta value according to step size
+
+        Args:
+            current_step (int): the current step of calculation, at range [1, self.max_step_size]
+            window_diff (float): the normalized difference between two consequential windows, at range [0.0, 1.0]
+        Returns:
+            float: the beta weight at range [self.min, self.max]
+        """      
+        if window_diff and current_step:
+            self.value= min(self.min + \
+                self.step_size * self.window_diff_factor * torch.tanh(window_diff) * (current_step / self.max_step_size), 
+                self.max)  
+        if current_step:
+            self.value= min(self.min + \
+                self.step_size * (current_step / self.max_step_size), 
+                self.max)   
+        if window_diff:
+            self.value= min(self.min + \
+                self.step_size * torch.tanh(window_diff)* self.window_diff_factor, 
+                self.max)   
+        else:
+            self.value=self.max
+            
+        return self.value
+              
+    
+@dataclass
+class Window:
+    window_size:int
+    beta:Beta = None
+    __history:Tensor = None
+    __window_step:int = 1
+    __first_window_flag:bool = True
+    __initialize_flag:bool = True
+    
+    def __post_init__(self):
+        # After the object is initialized, we can safely use the window_size field
+        self.beta = Beta(max_step_size=self.window_size * 2)
+
+    def init_history(self, value_size:Union[list,tuple,torch.Size], device:torch.device=None):
+        """Initialize container for values, given the size of a single value.
+           This function will exit if history is already initialized.
+
+        Args:
+            value_size (list or tuple or torch.size): The size of the value to be stored
+        """        
+        if self.__initialize_flag:
+            self.__initialize_flag = False
+            if isinstance(value_size, (torch.Size, tuple)):
+                value_size = list(value_size)
+            value_size.insert(0, self.window_size*2)
+            self.__history = torch.zeros(size=value_size, device=device)
+    
+    def __get_current_window(self):
+        return self.__history[:self.window_size]
+    
+    def __get_previous_window(self):
+        return self.__history[self.window_size:]
+    
+    
+    def step(self, value:Tensor)->Tensor:
+        """Compute the moving beta-weighted average value at history based on:
+               output = beta * average window value + (1 - beta) * current value
+
+        Args:
+            value (Tensor): The value to recorded into history and windowed
+
+        Returns:
+            Tensor: a weighted moving windowed value, same shape as the input value.
+        """
+        # roll the history by insert the new value at first and remove the oldest value
+        if value.ndim == 1:
+            value = value.unsqueeze(0)
+        self.__history = torch.cat((value, self.__history[:-1]), dim=0)
+        current_window = self.__get_current_window()
+        
+        # Calculate dynamic beta value
+        if self.__window_step == self.window_size*2:
+            self.__clear_step()
+            previous_window = self.__get_previous_window()
+            frobenius_norm = torch.norm(current_window - previous_window, p='fro')
+            if self.__first_window_flag:
+                # only pass the windows step to caucluation when the first window is not fully computed
+                self.beta.calculate(self.__window_step, frobenius_norm)
+            else:
+                # pass the frobenius_norm to beta calculation, 
+                # add weight to average window when the difference between two windows are high, 
+                # add weight to current value when the difference between two windows are low
+                self.beta.calculate(window_diff=frobenius_norm)
+        elif self.__first_window_flag:
+                # only pass the windows step to caucluation when the first window is not fully computed
+                self.beta.calculate(self.__window_step)
+        
+        # Iterate step
+        self.__window_step += 1
+                           
+        # Compute a moving pi with beta 
+        weighted_average_value = (self.beta.value * current_window.mean(0) + (1 - self.beta.value) * value).flatten()
+        
+        return weighted_average_value
+        
+    def __clear_step(self):
+        if self.__first_window_flag:
+            self.__first_window_flag = False
+        self.__window_step = 0
 
 class MoE(nn.Module):
 
@@ -346,6 +464,7 @@ class TaskMoE(MoE):
                  task_num:int=9, 
                  noisy_gating:bool=True, 
                  gating_activation=nn.GELU(), 
+                 moe_multiple_gate:bool=False,
                  **kwargs):
         
         self.task_num = task_num
@@ -353,7 +472,7 @@ class TaskMoE(MoE):
         self.w_MI = w_MI
         self.w_H = w_H
         self.w_finetune_MI = w_finetune_MI
-
+        self.moe_multiple_gate = moe_multiple_gate
         self.limit_k = max(k, limit_k)
         
         assert gating_activation!= None, 'gating_activation cannot be None'
@@ -367,13 +486,21 @@ class TaskMoE(MoE):
                                       **kwargs)
     
 
-        if w_finetune_MI < -100: ## hack
+        if w_finetune_MI < -100 and self.moe_multiple_gate: ## hack
             w_finetune_MI = 0
             self.w_finetune_MI = 0
             self.f_gate = nn.ModuleList([nn.Sequential(
                                                 nn.Linear(input_size,
                                                       2 * num_experts if noisy_gating else num_experts,
                                                       bias=False)
+                                        ) for i in range(task_num)])
+        elif self.moe_multiple_gate:
+            self.f_gate = nn.ModuleList([nn.Sequential(
+                                            nn.Linear(input_size, input_size//4),
+                                            gating_activation,
+                                            nn.Linear(input_size//4,
+                                                      2 * num_experts if noisy_gating else num_experts,
+                                                      bias=True)
                                         ) for i in range(task_num)])
         else:
             self.f_gate = nn.ModuleList([nn.Sequential(
@@ -382,11 +509,14 @@ class TaskMoE(MoE):
                                             nn.Linear(input_size//4,
                                                       2 * num_experts if noisy_gating else num_experts,
                                                       bias=True)
-                                        ) for i in range(task_num)])
+                                        ) for i in range(1)])
         
         # 初始化门控权重
-        for i in range(task_num):
-            nn.init.zeros_(self.f_gate[i][-1].weight) 
+        if self.moe_multiple_gate:
+            for i in range(task_num):
+                nn.init.zeros_(self.f_gate[i][-1].weight) 
+        else:
+            nn.init.zeros_(self.f_gate[0][-1].weight) 
 
 
         # VARIABLES FOR MI LOSS CALCULATION
@@ -395,6 +525,11 @@ class TaskMoE(MoE):
         self.register_buffer('PTE', torch.zeros(self.task_num, self.num_experts)) # 任务特定的专家概率表
         self.register_buffer('PE', torch.zeros(self.num_experts))# 专家的概率表
         self.register_buffer('times',torch.zeros(1))# 记录次数的缓冲区
+        
+        self.window_length = 20
+        self.window = Window(self.window_length)
+        
+        
         self.momentum = 0.0# Initialize momemtum for MI loss
         self.task_gate_freq = [0] * self.task_num
         self.topk_acc_probs = [0] * self.task_num
@@ -510,16 +645,16 @@ class TaskMoE(MoE):
     def top_k_gating_deepseek(self, x:Tensor, task_bh:Tensor)->Tensor:
         bsz, seq_len, h = x.shape  
         # Generate a mask corresponding to the task id
-        categories, task_masks = self.get_task_mask(x, task_bh)
-        logits = torch.zeros(size=[bsz, seq_len, self.num_experts],device=x.device)
-        for i, task_mask in enumerate(task_masks):
-            logits += self.f_gate[categories[i]](x * task_mask.view(bsz, 1,1))
-        
-        # 如果有大量不同的任务类别，这可能会导致内存问题，因此应评估任务类别的数量,在batch层级处理
-        # for category in categories:
-        #     mask = (task_bh == category).unsqueeze(-1).unsqueeze(-1)  # [bsz, 1, 1]
-        #     gate_fn = self.f_gate[category]
-        #     logits += torch.where(mask, gate_fn(x), torch.tensor(0., device=x.device))
+        if self.moe_multiple_gate:
+            categories, task_masks = self.get_task_mask(x, task_bh)
+            # logits = torch.zeros(size=[bsz, seq_len, self.num_experts],device=x.device)
+            # for i, task_mask in enumerate(task_masks):
+            #     logits += self.f_gate[categories[i]](x * task_mask.view(bsz, 1,1))
+            masked_x = x.unsqueeze(0) * task_masks.view(*task_masks.shape,1,1)  # masked_x.Shape: [num_categories, bsz, seq_len, num_tasks]
+            all_logits = self.f_gate[categories](masked_x)
+            logits = all_logits.sum(0)
+        else:
+            logits = self.f_gate[0](x)
         
         # compute gating scores
         scores = logits.softmax(dim=-1)
@@ -531,11 +666,24 @@ class TaskMoE(MoE):
         if self.training: #and self.alpha > 0.0:
             # always compute aux loss based on the naive greedy topk method
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            
+            # count how many tokens selected per gate in all batch sizes
             mask_ce = F.one_hot(topk_idx_for_aux_loss.view(-1), num_classes=self.num_experts)
-            ce = mask_ce.float().mean(0)
-            Pi = scores.mean(0)
-            fi = ce * self.num_experts # where is '/K'
-            aux_loss = (Pi * fi).sum() #* self.alpha
+            ce = mask_ce.float().mean(0) # no need to divide by k since maskce is viewed and meaned
+            fi = ce * self.num_experts 
+            
+            # calculate current Pi
+            Pi = scores.view(-1, self.num_experts).mean(0)
+            
+            # initialize history if this is the first time applied
+            self.window.init_history(Pi.size(), Pi.device)
+            
+            # step the window
+            moving_average_pi = self.window.step(Pi.detach())
+            
+            # Get the buffered auxiliary loss
+            aux_loss = (moving_average_pi * fi).sum()
+            
         else: # do not calculate aux when inferencing
             aux_loss = None
             
@@ -577,14 +725,11 @@ class TaskMoE(MoE):
     
     def get_task_mask(self, x:Tensor, task_ids:Tensor):
         # Find unique categories
-        unique_categories = torch.unique(task_ids)
+        unique_categories:Tensor = torch.unique(task_ids) # shape: [number_categories] 
 
         # Generate masks for each category
-        masks = [(task_ids == category) for category in unique_categories]
+        masks = task_ids.unsqueeze(0) == unique_categories.unsqueeze(1) # shape: [number_categories, batch_size]
 
-        # Print masks
-        # for i, mask in enumerate(masks):
-        #     print(f"Mask for category {unique_categories[i]}: {mask}")
         return unique_categories, masks
     
     def deepseekforward(self, x:Tensor, task_bh:Tensor):    

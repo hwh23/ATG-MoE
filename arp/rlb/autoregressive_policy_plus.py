@@ -100,6 +100,12 @@ class PolicyNetwork(nn.Module):
         # then use xyz feature as a condition, to produce each xyz for stage 2
         # then produce rot and grip separately
 
+        #region parse moe properties
+        self.moe_weight = model_cfg.moe_weight
+        self.is_moe = model_cfg.is_moe
+        self.moe_multiple_gate = model_cfg.moe_multiple_gate
+        #endregion
+        
         arp_cfg = ModelConfig(
             n_embd=128,
             embd_pdrop = 0.1, 
@@ -131,7 +137,8 @@ class PolicyNetwork(nn.Module):
                 LayerType.make(n_head=8, name='self')
             ] * 6,
             
-            is_moe=False,
+            is_moe=self.is_moe,
+            moe_multiple_gate=self.moe_multiple_gate,
             
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
@@ -528,7 +535,8 @@ class PolicyNetwork(nn.Module):
                     'v1_norm': norm(visual_featmap_1.flatten(0, 1)),
                     'v2_norm': norm(visual_featmap_2.flatten(0, 1))
             }
-            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()
+            # normalized with standard deviation over the batch
+            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum() * self.moe_weight
             return loss_dict
         else:
             final_waypoint = rev_trans_stage1[0](rev_trans_stage2(waypoint_stage2))

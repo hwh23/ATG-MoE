@@ -1,12 +1,3 @@
-hydra:
-  job:
-    name: arp_plus # default # arp_plus # eval.arp_plus
-    chdir: false
-  run:
-    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M}
-  
-# ================================================ #
-
 py_module: autoregressive_policy_plus
 
 model:
@@ -14,6 +5,9 @@ model:
   # weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
 
   hp:
+    moe_weight: 1
+    is_moe: true
+    moe_multiple_gate: false
     add_corr: true
     add_depth: true
     add_lang: true
@@ -52,7 +46,7 @@ model:
 
     # lr should be thought on per sample basis
     # effective lr is multiplied by bs * num_devices
-    lr: 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
+    lr: 1.75e-5 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
     warmup_steps: 2000
     optimizer_type: lamb
     lr_cos_dec: true
@@ -122,7 +116,15 @@ eval:
   device: 0
 
 
+# ================================================ #
 
+hydra:
+  job:
+    name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
+    chdir: false
+  run:
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/${now:%Y-%m-%d_%H-%M}
+  
 output_dir: ${hydra:run.dir} 
 # output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'
 wandb: null
