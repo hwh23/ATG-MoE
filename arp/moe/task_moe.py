@@ -188,18 +188,26 @@ class Beta:
             float: the beta weight at range [self.min, self.max]
         """      
         if window_diff and current_step:
+            # at the case when the window step havent hit 20
+            # and dynamic beta computation is required
             self.value= min(self.min + \
                 self.step_size * self.window_diff_factor * torch.tanh(window_diff) * (current_step / self.max_step_size), 
                 self.max)  
-        if current_step:
+        elif current_step:
+            # at the case when the window step havent hit 20
+            # and no dynamic beta computation required
             self.value= min(self.min + \
                 self.step_size * (current_step / self.max_step_size), 
                 self.max)   
-        if window_diff:
+        elif window_diff:
+            # at the case when the window step hit 20 once 
+            # and beta uses windows diff to compute beta dynamically
             self.value= min(self.min + \
                 self.step_size * torch.tanh(window_diff)* self.window_diff_factor, 
                 self.max)   
         else:
+            # at the case when the window step hit 20 once
+            # no dynamic beta required
             self.value=self.max
             
         return self.value
@@ -208,11 +216,13 @@ class Beta:
 @dataclass
 class Window:
     window_size:int
+    apply_dynamic_beta_flag:bool = False
     beta:Beta = None
     __history:Tensor = None
     __window_step:int = 1
     __first_window_flag:bool = True
     __initialize_flag:bool = True
+    
     
     def __post_init__(self):
         # After the object is initialized, we can safely use the window_size field
@@ -233,7 +243,10 @@ class Window:
             self.__history = torch.zeros(size=value_size, device=device)
     
     def __get_current_window(self):
-        return self.__history[:self.window_size]
+        if self.__first_window_flag:
+            return self.__history[:self.__window_step]
+        else:
+            return self.__history[:self.window_size]
     
     def __get_previous_window(self):
         return self.__history[self.window_size:]
@@ -249,36 +262,44 @@ class Window:
         Returns:
             Tensor: a weighted moving windowed value, same shape as the input value.
         """
-        # roll the history by insert the new value at first and remove the oldest value
+        # Add dimension if ndim is one. The operation is done for the torch.cat
         if value.ndim == 1:
             value = value.unsqueeze(0)
+            
+        # roll the history by insert the new value at first and remove the oldest value
         self.__history = torch.cat((value, self.__history[:-1]), dim=0)
+        
+        # get current window of history
         current_window = self.__get_current_window()
         
-        # Calculate dynamic beta value
-        if self.__window_step == self.window_size*2:
-            self.__clear_step()
-            previous_window = self.__get_previous_window()
-            frobenius_norm = torch.norm(current_window - previous_window, p='fro')
-            if self.__first_window_flag:
-                # only pass the windows step to caucluation when the first window is not fully computed
-                self.beta.calculate(self.__window_step, frobenius_norm)
-            else:
-                # pass the frobenius_norm to beta calculation, 
-                # add weight to average window when the difference between two windows are high, 
-                # add weight to current value when the difference between two windows are low
-                self.beta.calculate(window_diff=frobenius_norm)
-        elif self.__first_window_flag:
-                # only pass the windows step to caucluation when the first window is not fully computed
-                self.beta.calculate(self.__window_step)
+        # whether or not to parse current window step to beta calculator
+        beta_step = self.__window_step if self.__first_window_flag else self.window_size
         
-        # Iterate step
-        self.__window_step += 1
-                           
+        # the following decides whether and when to parse windows difference to beta calculator
+        get_diff_flag = self.__window_step == self.window_size*2 and self.apply_dynamic_beta_flag
+        
+        # Get norm of windows difference
+        frobenius_norm = torch.norm(current_window-self.__get_previous_window(), p='fro') if get_diff_flag else None
+        
+        # Calculate beta value
+        self.beta.calculate(beta_step, frobenius_norm)
+        
         # Compute a moving pi with beta 
         weighted_average_value = (self.beta.value * current_window.mean(0) + (1 - self.beta.value) * value).flatten()
         
+        # Iterate or reset steps. 
+        # Note: call this after obtaining the step value 
+        # because it will be updated after the function
+        self.__iterate_window()
+        
         return weighted_average_value
+    
+    def __iterate_window(self):
+        if self.__window_step == self.window_size*2:
+            # clear steps when the step is equal to the length of history. 
+            # It measures when the elements in the history are full-filled/refreshed
+            self.__clear_step()
+        self.__window_step += 1
         
     def __clear_step(self):
         if self.__first_window_flag:
@@ -669,10 +690,12 @@ class TaskMoE(MoE):
             
             # count how many tokens selected per gate in all batch sizes
             mask_ce = F.one_hot(topk_idx_for_aux_loss.view(-1), num_classes=self.num_experts)
+            # the mean of expert selection among all data 
             ce = mask_ce.float().mean(0) # no need to divide by k since maskce is viewed and meaned
+            # scale up 
             fi = ce * self.num_experts 
             
-            # calculate current Pi
+            # calculate current Pi: the mean of scores of each expert among all data
             Pi = scores.view(-1, self.num_experts).mean(0)
             
             # initialize history if this is the first time applied
@@ -681,8 +704,11 @@ class TaskMoE(MoE):
             # step the window
             moving_average_pi = self.window.step(Pi.detach())
             
-            # Get the buffered auxiliary loss
-            aux_loss = (moving_average_pi * fi).sum()
+            # Get the buffered auxiliary loss, 
+            # noticed that the original loss was in range [1, num_expert], 
+            # map the loss to range [0,1], -0.6 leaves some space in case loss becomes negative
+            # the weight will be applied outside the MoE layer
+            aux_loss = ((moving_average_pi * fi).sum() - 0.6)/(self.num_experts - 1)
             
         else: # do not calculate aux when inferencing
             aux_loss = None
