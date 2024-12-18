@@ -5,7 +5,7 @@ model:
   # weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
 
   hp:
-    moe_weight: 1
+    moe_weight: 2
     is_moe: true
     moe_multiple_gate: false
     add_corr: true

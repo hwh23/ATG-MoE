@@ -402,9 +402,11 @@ class PolicyNetwork(nn.Module):
                 waypoint_stage1_noisy = add_uniform_noise(
                     waypoint_stage1.clone().detach(), 2 * self.stage2_waypoint_label_noise
                 )
-                # 把pc从cube大小放大到self.stage2_zoom_scale
+                # 输出的pc是加噪变形后的pc: point-wise将pc - waypoint_stage1_noisy，然后再按照self.stage2_zoom_scale放大
+                # rev_trans_stage2是能把加噪变形后的pc还原的函数
                 pc, rev_trans_stage2 = transform_pc(pc, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
-                # 把gt 轨迹放到加噪后的轨迹的中心点,并且放大到self.stage2_zoom_scale
+                # waypoint_stage2：加噪变形后的waypoint
+                # 把gt轨迹减去waypoint_stage1_noisy,并且放大到self.stage2_zoom_scale
                 waypoint_stage2, _ = transform_pc(waypoint_stage1, loc=waypoint_stage1_noisy, sca=self.stage2_zoom_scale)
             else:
                 # Transform the way point predicted from stage1
@@ -535,8 +537,8 @@ class PolicyNetwork(nn.Module):
                     'v1_norm': norm(visual_featmap_1.flatten(0, 1)),
                     'v2_norm': norm(visual_featmap_2.flatten(0, 1))
             }
-            # normalized with standard deviation over the batch
-            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum() * self.moe_weight
+            # normalized with the number of elements in aux loss tensor
+            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()/loss_dict['aux_loss'].numel() * self.moe_weight
             return loss_dict
         else:
             final_waypoint = rev_trans_stage1[0](rev_trans_stage2(waypoint_stage2))
