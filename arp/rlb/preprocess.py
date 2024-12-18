@@ -779,7 +779,7 @@ def apply_se3_augmentation(
 def add_uniform_noise(x, u):
     """
     adds uniform noise to a tensor x. output is tensor where each element is
-    in [x-u, x+u]
+    in range [x-u, x+u]
     :param x: tensor
     :param u: float
     """
