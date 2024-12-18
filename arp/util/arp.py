@@ -30,6 +30,8 @@ def modulate(x, shift, scale):
     """ x: (bs, L, d)
         shift: (bs, L, d)
         scale: (bs, L, d)
+        return:   x * (1 + scale) + shift 
+                = x + x*scale + shift
     """
     return x * (1 + scale) + shift
 
@@ -158,6 +160,11 @@ class ChunkTransformerLayer(nn.Module):
                  moe_multiple_gate:bool=False,
                  ):
         super().__init__()
+        # layer normalization: 
+        # if elementwise_affine         i.e.AdaLN==False
+        #   operation=(x.mean()/(x.std() + eps))*learnable affine 
+        # else                          i.e.AdaLN==True
+        #   operation=(x.mean()/(x.std() + eps))
         self.ln_attn = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
         self.ln_mlp = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
 
@@ -286,14 +293,14 @@ class ChunkTransformerLayer(nn.Module):
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(cond_attn).chunk(6, dim=-1)
             x = x + gate_msa * self.attn(modulate(self.ln_attn(x), shift_msa, scale_msa), attn_mask=mask)
             if self.is_moe:
-                x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
+                x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)[0]
             else:
                 x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
         else:
             x = x + cond_attn
             x = x + self.attn(self.ln_attn(x), attn_mask=mask)
             if self.is_moe:
-                x = x + self.propagate(self.ln_mlp(x), task_ids)
+                x = x + self.propagate(self.ln_mlp(x), task_ids)[0]
             else:
                 x = x + self.propagate(self.ln_mlp(x))
                 
@@ -1169,10 +1176,11 @@ class AutoRegressivePolicy(nn.Module):
         if training:
             train_masks = ChunkTransformerLayer.train_attn_masks(chk_ids)
             embs = [self.drop(e + pos_emb) for e in embs]
-            for layer_id in layer_ids:
+            aux_loss = torch.zeros(size=[len(layer_ids), len(embs)])
+            for idx, layer_id in enumerate(layer_ids):
                 block: ChunkTransformerLayer = self.blocks[layer_id]
                 cond = contexts[block.conditional] if block.conditional else None
-                embs, aux_loss = block.forward_train(embs, cond, train_masks, dependency_attn_mask=dependency_attn_mask, task_ids=task_ids)
+                embs, aux_loss[idx] = block.forward_train(embs, cond, train_masks, dependency_attn_mask=dependency_attn_mask, task_ids=task_ids)
                 if self.cfg.layer_norm_every_block:
                     embs = [self.layer_norms[layer_id](e) for e in embs] 
             if not self.cfg.layer_norm_every_block:
