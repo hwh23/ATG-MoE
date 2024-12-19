@@ -12,7 +12,7 @@ from time import time
 import sys, shlex
 from utils import configurable, DictConfig, config_to_dict
 import torch.multiprocessing as mp
-from utils.dist import find_free_port
+from utils.dist import find_free_port, find_free_port_for_tensorboard
 import torch.distributed as dist
 from dataset import TransitionDataset
 from utils.structure import RLBENCH_TASKS
@@ -20,8 +20,10 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from runstats import Statistics
 from torch.utils.tensorboard import SummaryWriter
-
-
+import logging
+from tensorboard import program
+# Suppress TensorBoard logs
+logging.getLogger('tensorboard').setLevel(logging.ERROR)
 
 def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, rank: int = 0, save_freq: int = 6000, start_step=0, use_wandb=False,
           writer: SummaryWriter=None):
@@ -130,6 +132,14 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
         torch.set_grad_enabled(False)
     else:
         agent.train()
+
+    # Create a TensorBoard program instance
+    tb = program.TensorBoard()
+    # Launch TensorBoard
+    tb.configure(argv=[None, '--logdir', cfg.output_dir, '--port', str(find_free_port_for_tensorboard())])
+    print(f"\n==================================" + \
+          f"TensorBoard is running at {tb.launch()}" + \
+          f"==================================\n")
 
     train(agent, dataloader, log, device, freq=cfg.train.disp_freq, rank=rank, save_freq=cfg.train.save_freq, 
         start_step=start_step, use_wandb=cfg.wandb and rank == 0,
