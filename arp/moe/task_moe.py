@@ -172,11 +172,17 @@ class ParallelExperts(nn.Module):
 @dataclass
 class Beta:
     max_step_size:int
-    max:float= 0.95
+    max:float=0.95
     min:float=0.9
-    step_size:float=0.05 # (max-min)/max_step_size
-    value:float=0.9
-    window_diff_factor:float = 7.0
+    step_size:float=None # (max-min)/max_step_size
+    window_diff_factor:float = 7.0 # the factor multiplied with windows diff
+    window_diff_func=torch.tanh # the function applied on windows diff, tanh effectively maps diff to [0,1]
+    value:float=min # the beta value, default is min
+    
+    def __post_init__(self):
+        if self.step_size == None:
+            self.step_size = (self.max-self.min)/self.max_step_size
+            
     
     def calculate(self, current_step:int=None, window_diff:float=None)->float:
         """Calculate the beta value according to step size
@@ -191,19 +197,19 @@ class Beta:
             # at the case when the window step havent hit 20
             # and dynamic beta computation is required
             self.value= min(self.min + \
-                self.step_size * self.window_diff_factor * torch.tanh(window_diff) * (current_step / self.max_step_size), 
+                self.step_size * self.window_diff_factor * self.window_diff_func(window_diff) * current_step, 
                 self.max)  
         elif current_step:
             # at the case when the window step havent hit 20
             # and no dynamic beta computation required
             self.value= min(self.min + \
-                self.step_size * (current_step / self.max_step_size), 
+                self.step_size * current_step, 
                 self.max)   
         elif window_diff:
             # at the case when the window step hit 20 once 
-            # and beta uses windows diff to compute beta dynamically
+            # and beta uses windows diff to compute beta dynamically            
             self.value= min(self.min + \
-                self.step_size * torch.tanh(window_diff)* self.window_diff_factor, 
+                self.step_size * self.window_diff_func(window_diff)* self.window_diff_factor, 
                 self.max)   
         else:
             # at the case when the window step hit 20 once
@@ -228,6 +234,28 @@ class Window:
         # After the object is initialized, we can safely use the window_size field
         self.beta = Beta(max_step_size=self.window_size * 2)
 
+
+    def __get_current_window(self):
+        if self.__first_window_flag:
+            return self.__history[:self.__window_step]
+        else:
+            return self.__history[:self.window_size]
+    
+    def __get_previous_window(self):
+        return self.__history[self.window_size:]
+
+    def __iterate_window(self):
+        if self.__window_step == self.window_size*2:
+            # clear steps when the step is equal to the length of history. 
+            # It measures when the elements in the history are full-filled/refreshed
+            self.__clear_step()
+        self.__window_step += 1
+        
+    def __clear_step(self):
+        if self.__first_window_flag:
+            self.__first_window_flag = False
+        self.__window_step = 0
+    
     def init_history(self, value_size:Union[list,tuple,torch.Size], device:torch.device=None):
         """Initialize container for values, given the size of a single value.
            This function will exit if history is already initialized.
@@ -241,17 +269,7 @@ class Window:
                 value_size = list(value_size)
             value_size.insert(0, self.window_size*2)
             self.__history = torch.zeros(size=value_size, device=device)
-    
-    def __get_current_window(self):
-        if self.__first_window_flag:
-            return self.__history[:self.__window_step]
-        else:
-            return self.__history[:self.window_size]
-    
-    def __get_previous_window(self):
-        return self.__history[self.window_size:]
-    
-    
+        
     def step(self, value:Tensor)->Tensor:
         """Compute the moving beta-weighted average value at history based on:
                output = beta * average window value + (1 - beta) * current value
@@ -294,17 +312,6 @@ class Window:
         
         return weighted_average_value
     
-    def __iterate_window(self):
-        if self.__window_step == self.window_size*2:
-            # clear steps when the step is equal to the length of history. 
-            # It measures when the elements in the history are full-filled/refreshed
-            self.__clear_step()
-        self.__window_step += 1
-        
-    def __clear_step(self):
-        if self.__first_window_flag:
-            self.__first_window_flag = False
-        self.__window_step = 0
 
 class MoE(nn.Module):
 
