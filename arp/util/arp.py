@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp
 import numpy as np
 import torch.distributions as D
-from arp.moe import TaskMoE
+from arp.moe import MoE
 
 
 #region Chunk Transformer Layer
@@ -175,7 +175,7 @@ class ChunkTransformerLayer(nn.Module):
         self.is_moe = is_moe
         if is_moe:
             from arp.rlb.utils_with_rlbench import TASK_TO_ID
-            self.propagate = TaskMoE(input_size=hidden_size,
+            self.propagate = MoE(input_size=hidden_size,
                            head_size=mlp_hidden_dim,
                            num_experts=8,
                            k=2,
@@ -1084,6 +1084,7 @@ class AutoRegressivePolicy(nn.Module):
         self.is_moe = cfg.is_moe
         self.moe_multiple_gate = cfg.moe_multiple_gate
         #endregion
+        
         for tk_id, tk in enumerate(cfg.tokens):
             assert tk['embedding'] in register_token_embedding.map, f"token embedding type: {tk['embedding']} not found!"
             self.token_name_2_ids[tk['name']] = tk_id
@@ -1172,10 +1173,11 @@ class AutoRegressivePolicy(nn.Module):
         if training: dev, (bs, L) = embs[0].device, embs[0].shape[:2]
         else: dev, (bs, L) = embs.device, embs.shape[:2]
 
+        # Generate the positional embeddings (position 0,1,2,3,4,..,L-1) for a sequence length `L`
         pos_emb = self.pos_emb(torch.arange(0, L, dtype=torch.long, device=dev))[None, ...]
         if training:
             train_masks = ChunkTransformerLayer.train_attn_masks(chk_ids)
-            embs = [self.drop(e + pos_emb) for e in embs]
+            embs = [self.drop(e + pos_emb) for e in embs] # Elementwisely add positional embeddings to input embeddings; then apply dropout
             aux_loss = torch.zeros(size=[len(layer_ids), len(embs)])
             for idx, layer_id in enumerate(layer_ids):
                 block: ChunkTransformerLayer = self.blocks[layer_id]
@@ -1227,7 +1229,9 @@ class AutoRegressivePolicy(nn.Module):
         dependency_attn_mask = ChunkTransformerLayer.dependency_attn_mask(tk_ids, 
                     map2(self.f_token_name_2_ids, block_attn_directions)) if block_attn_directions else None
 
+        # Embed the known, groundtruth values to embs_star
         embs_star = self.token_codes_to_embeddings(tk_codes, tk_ids, **contexts) 
+        # The tokens to be predicted are embedded by chunk embedder 
         embs_hat = self.chunk_embedder(chk_ids, tk_ids)
 
         if match_layer:
