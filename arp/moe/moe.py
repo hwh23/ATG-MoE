@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
-from torch.cuda.amp import custom_fwd, custom_bwd
+from torch.amp import custom_fwd, custom_bwd
 from typing import Any, Dict, List, Optional
 from torch import Tensor
 from dataclasses import dataclass
@@ -312,162 +312,8 @@ class Window:
         
         return weighted_average_value
     
-
+    
 class MoE(nn.Module):
-
-    """Call a Sparsely gated mixture of experts layer with 1-layer Feed-Forward networks as experts.
-    Args:
-    input_size: integer - size of the input
-    output_size: integer - size of the input
-    num_experts: an integer - number of experts
-    hidden_size: an integer - hidden size of the experts
-    noisy_gating: a boolean
-    k: an integer - how many experts to use for each batch element
-    """
-
-    def __init__(self, input_size, head_size, num_experts, k,
-                 cvloss=0, switchloss=0, zloss=0,
-                 bias=True, 
-                 gating_activation=None, activation=nn.Sequential(nn.GELU()), 
-                 noisy_gating=True,
-                 acc_aux_loss=False):
-        super(MoE, self).__init__()
-
-        self.noisy_gating = noisy_gating
-        self.num_experts = num_experts
-        self.input_size = input_size
-        self.head_size = head_size
-        self.bias = bias
-        self.experts = ParallelExperts(num_experts, input_size, head_size, bias)
-        self.output_experts = ParallelExperts(num_experts, head_size, input_size, bias)
-        self.k = min(k, self.num_experts)
-        self.cvloss = cvloss
-        self.switchloss = switchloss
-        self.zloss = zloss
-        self.activation = activation
-        assert activation!=None, 'Activation function cannot be None'
-        assert gating_activation!=None, 'gating_activation function cannot be None'
-
-        self.acc_aux_loss = acc_aux_loss
-        if self.acc_aux_loss:
-            self.init_aux_statistics()
-        
-        if gating_activation is None:
-            gating_activation = nn.ReLU()
-        self.f_gate = nn.Sequential(
-            nn.Linear(input_size,
-                        2 * num_experts if noisy_gating else num_experts,
-                        bias=False)
-        )
-        nn.init.zeros_(self.f_gate[-1].weight)
-        
-
-    def extra_repr(self):
-        return 'k={}, cvloss={}, switchloss={}, zloss={}, noisy_gating={}'.format(
-            self.k, self.cvloss, self.switchloss, self.zloss, self.noisy_gating)
-
-    def cv_squared(self, x):
-        """The squared coefficient of variation of a sample.
-        Useful as a loss to encourage a positive distribution to be more uniform.
-        Epsilons added for numerical stability.
-        Returns 0 for an empty Tensor.
-        Args:
-        x: a `Tensor`.
-        Returns:
-        a `Scalar`.
-        """
-        eps = 1e-10
-        # if only num_experts = 1
-
-        if x.shape[0] == 1:
-            return 0
-        return x.float().var() / (x.float().mean()**2 + eps)
-
-    def init_aux_statistics(self):
-        self.acc_probs = 0.
-        self.acc_gates = 0.
-        self.acc_freq = 0.
-        self.acc_lsesq = 0.
-        self.acc_lsesq_count = 0.
-
-    def update_aux_statistics(self, logits, topk_weight, gates):
-        lsesq = torch.log(torch.exp(logits).sum(dim=1) + 0.000001) ** 2
-        self.acc_probs = self.acc_probs + topk_weight.sum(0)
-        self.acc_gates = self.acc_gates + gates.sum(0)
-        self.acc_freq = self.acc_freq + (gates > 0).float().sum(0)
-        self.acc_lsesq = self.acc_lsesq + lsesq.sum()
-        self.acc_lsesq_count = self.acc_lsesq_count + lsesq.size(0)
-
-    def get_aux_loss_and_clear(self):
-        cvloss = self.cv_squared(F.normalize(self.acc_gates, p=1, dim=0))
-        # cvloss = self.acc_gates.mean() / 10000.0
-        switchloss = (F.normalize(self.acc_probs, p=1, dim=0) *
-                      F.normalize(self.acc_freq, p=1, dim=0)).sum() * self.num_experts
-        zloss = self.acc_lsesq / (self.acc_lsesq_count)
-        loss = (self.cvloss * cvloss +
-                self.switchloss * switchloss +
-                self.zloss * zloss)
-        self.init_aux_statistics()
-        return loss
-
-    def compute_cvloss(self, topk_weight):
-        return self.cv_squared(F.normalize(topk_weight.sum(0), p=1, dim=0))
-
-    def compute_switchloss(self, topk_weight, freqs):
-        loss = F.normalize(topk_weight.sum(0), p=1, dim=0) * \
-               F.normalize(freqs.float(), p=1, dim=0)
-        return loss.sum() * self.num_experts
-
-    def compute_zloss(self, logits):
-        zloss = torch.mean(torch.log(torch.exp(logits).sum(dim=1)) ** 2)
-        return zloss
-
-
-    def map(self, x, task_bh, skip_mask=None, sample_topk=0):
-        """Args:
-        x: tensor shape [batch_size, input_size]
-        train: a boolean scalar.
-        loss_coef: a scalar - multiplier on load-balancing losses
-        Returns:
-        y: a tensor with shape [batch_size, output_size].
-        extra_training_loss: a scalar.  This should be added into the overall
-        training loss of the model.  The backpropagation of this loss
-        encourages all experts to be approximately equally used across a batch.
-        """
-        bsz, length, emb_size = x.size()
-        x = x.reshape(-1, emb_size)
-        if skip_mask is not None:
-            skip_mask = skip_mask.view(-1, 1)
-        loss = self.top_k_gating(x, task_bh, skip_mask,  sample_topk=sample_topk)
-
-        expert_inputs = x[self.batch_index]
-        expert_outputs = self.experts(expert_inputs, self.expert_size)
-
-        zeros = torch.zeros((bsz * length * self.k, self.head_size), 
-            dtype=expert_outputs.dtype, device=expert_outputs.device)
-        y = zeros.index_add(0, self.index_sorted_experts, expert_outputs)
-        y = y.view(bsz, length, self.k, -1)
-        return y, loss
-
-    def reduce(self, x, multiply_by_gates=True):
-        bsz, length, k, emb_size = x.size()
-        x = x.view(-1, emb_size)
-
-        expert_inputs = x[self.index_sorted_experts]
-        expert_outputs = self.output_experts(expert_inputs, self.expert_size)
-
-        if multiply_by_gates:
-            expert_outputs = expert_outputs * self.batch_gates[:, None]
-
-        zeros = torch.zeros((bsz * length, self.input_size), 
-            dtype=expert_outputs.dtype, device=expert_outputs.device)
-        y = zeros.index_add(0, self.batch_index, expert_outputs)
-        y = y.view(bsz, length, self.input_size)
-        return y
-    
-    
-    
-class TaskMoE(MoE):
 
     """Call a Sparsely gated mixture of experts layer with 1-layer Feed-Forward networks as experts.
     Args:
@@ -488,35 +334,42 @@ class TaskMoE(MoE):
                  w_H:float=0.1, 
                  w_finetune_MI:float=0, 
                  limit_k:int=0, 
-                 w_topk_loss:float=0.0, 
                  task_num:int=9, 
                  noisy_gating:bool=True, 
                  gating_activation=nn.GELU(), 
                  moe_multiple_gate:bool=False,
-                 **kwargs):
+                 bias=True, 
+                 activation=nn.Sequential(nn.GELU()),
+                 ):
+        super().__init__()
         
+        self.noisy_gating = noisy_gating
+        self.num_experts = num_experts
+        self.input_size = input_size
+        self.head_size = head_size
+        self.bias = bias
+        self.experts = ParallelExperts(num_experts, input_size, head_size, bias)
+        self.output_experts = ParallelExperts(num_experts, head_size, input_size, bias)
+        self.k = min(k, self.num_experts)
+        self.limit_k = max(k, limit_k)
+        self.activation = activation
         self.task_num = task_num
-        self.w_topk_loss = w_topk_loss
+        self.moe_multiple_gate = moe_multiple_gate
+        
+        self.window_length = 20
+        self.window = Window(self.window_length)
+        
+        assert activation!=None, 'Activation function cannot be None'
+        assert gating_activation!=None, 'gating_activation function cannot be None'
+        
+        
         self.w_MI = w_MI
         self.w_H = w_H
-        self.w_finetune_MI = w_finetune_MI
-        self.moe_multiple_gate = moe_multiple_gate
-        self.limit_k = max(k, limit_k)
+        self.w_finetune_MI = w_finetune_MI if w_finetune_MI >= -100 else 0
         
-        assert gating_activation!= None, 'gating_activation cannot be None'
 
-        super(TaskMoE, self).__init__(input_size, 
-                                      head_size, 
-                                      num_experts, 
-                                      k, 
-                                      noisy_gating=noisy_gating, 
-                                      gating_activation=gating_activation, 
-                                      **kwargs)
-    
 
         if w_finetune_MI < -100 and self.moe_multiple_gate: ## hack
-            w_finetune_MI = 0
-            self.w_finetune_MI = 0
             self.f_gate = nn.ModuleList([nn.Sequential(
                                                 nn.Linear(input_size,
                                                       2 * num_experts if noisy_gating else num_experts,
@@ -547,21 +400,20 @@ class TaskMoE(MoE):
             nn.init.zeros_(self.f_gate[0][-1].weight) 
 
 
-        # VARIABLES FOR MI LOSS CALCULATION
+        # VARIABLES FOR ORIGINAL MI LOSS CALCULATION
         # Buffers are tensors that are part of the model's state 
         # but are not learnable parameters (i.e., they are not updated by backpropagation).
         self.register_buffer('PTE', torch.zeros(self.task_num, self.num_experts)) # 任务特定的专家概率表
         self.register_buffer('PE', torch.zeros(self.num_experts))# 专家的概率表
         self.register_buffer('times',torch.zeros(1))# 记录次数的缓冲区
-        
-        self.window_length = 20
-        self.window = Window(self.window_length)
-        
-        
         self.momentum = 0.0# Initialize momemtum for MI loss
         self.task_gate_freq = [0] * self.task_num
         self.topk_acc_probs = [0] * self.task_num
         self.token_probs = [0] * self.task_num
+     
+    def extra_repr(self):
+        return 'k={}, noisy_gating={}'.format(
+            self.k, self.noisy_gating)
 
     def get_MIloss(self, scores:Tensor, task_bh) ->Tensor:
         """Compute Mutual Information (MI) Loss for the current MoE layer. 
@@ -725,8 +577,6 @@ class TaskMoE(MoE):
         
         return topk_idx, topk_weight, aux_loss
     
-    
-    
     def sdpforward(self, x, task_bh, skip_mask=None, sample_topk=0, multiply_by_gates=True):
         bsz, length, emb_size = x.size()
         x = x.reshape(-1, emb_size)
@@ -792,12 +642,8 @@ if __name__ == '__main__':
     batch_size = 34
     sequence_length = 1
     input_size = 3
-    # model = TaskMoE(input_size=20,head_size=10,num_experts=5,k=2,activation=nn.Sequential(
-    #                         nn.GELU(),
-    #                     ),noisy_gating=False)
     
-    #替换测试
-    model = TaskMoE( # 这里加入了moe layer
+    model = MoE( # 这里加入了moe layer
             input_size, # input_size 
             input_size //2, # head_size
             8, # num_experts
@@ -811,26 +657,9 @@ if __name__ == '__main__':
                 nn.GELU(),
             ),
             noisy_gating=False,
-        )# 有三个输出y, loss, topk_weight
-    
-
-    #对比线性层，最后一维输出不一致，moe 20维，线性层需要3维,经过task moe维度不变
-    # model= nn.Sequential(
-    #         nn.Linear(input_size , input_size ),
-    #         nn.ReLU(),
-    #         nn.Linear(input_size , 3)
-    #     )
+        )
 
     input_data = torch.randn(batch_size, sequence_length, input_size)
 
-    # Specify the task or task batch you want to perform inference for.
-    task_batch_index = int(0) # Replace with the appropriate task batch index.
-
-    # You can skip certain tokens during inference by providing a skip_mask. 
-    # Set to None if you don't want to skip any tokens.
-    skip_mask = None
-
-    # Perform inference (forward pass) using the TaskMoE model for the specified task.
-
-    output, loss = model(input_data, task_batch_index, skip_mask=skip_mask)####
+    output, loss = model(input_data,  int(0), skip_mask=None)####
     print(loss.shape)

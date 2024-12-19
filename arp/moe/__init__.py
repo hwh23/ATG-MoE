@@ -1,4 +1,4 @@
-from .task_moe import TaskMoE
+from .moe import MoE
 
 # Optional: Define a public API
-__all__ = ["TaskMoE"]
+__all__ = ["MoE"]
