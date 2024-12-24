@@ -138,7 +138,7 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
     # Launch TensorBoard
     tb.configure(argv=[None, '--logdir', cfg.output_dir, '--port', str(find_free_port_for_tensorboard())])
     print(f"\n==================================" + \
-          f"TensorBoard is running at {tb.launch()}" + \
+          f" TensorBoard is running at {tb.launch()} " + \
           f"==================================\n")
 
     train(agent, dataloader, log, device, freq=cfg.train.disp_freq, rank=rank, save_freq=cfg.train.save_freq, 
