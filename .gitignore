@@ -171,3 +171,5 @@ weights/
 # ignore test file
 test.py
 arp/rlb/test_hwh.py
+
+modeling_deepseek.py
