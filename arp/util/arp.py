@@ -183,7 +183,6 @@ class ChunkTransformerLayer(nn.Module):
                            w_H=0,
                            w_finetune_MI=0,
                            limit_k=0,
-                           w_topk_loss=0,
                            task_num=len(TASK_TO_ID),
                            noisy_gating=False,
                            moe_multiple_gate=moe_multiple_gate,
@@ -1187,6 +1186,7 @@ class AutoRegressivePolicy(nn.Module):
                     embs = [self.layer_norms[layer_id](e) for e in embs] 
             if not self.cfg.layer_norm_every_block:
                 embs = [self.final_ln(e) for e in embs]
+            return embs, aux_loss    
         else:
             eval_mask = ChunkTransformerLayer.eval_attn_mask(chk_ids)
             if dependency_attn_mask is not None: 
@@ -1200,7 +1200,7 @@ class AutoRegressivePolicy(nn.Module):
                     embs = self.layer_norms[layer_id](embs)        
             if not self.cfg.layer_norm_every_block:
                 embs = self.final_ln(embs)
-        return embs, aux_loss
+            return embs
 
     def compute_loss(self, tks: Tensor, chk_ids: Optional[Tensor]=None, valid_tk_mask: Tensor=None, 
                      skip_tokens: List[int] = [], 
