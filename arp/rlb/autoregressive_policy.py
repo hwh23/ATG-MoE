@@ -870,8 +870,10 @@ class Policy:
         assert replay_sample["lang_goal_embs"].shape[1:] == (77, 512)
         assert replay_sample["low_dim_state"].shape[1:] == (self.proprio_dim,)
         assert self._network.training
+        self._network.update()
         with autocast(enabled=self.amp):
             loss_dict = self._network(replay_sample)
+            loss_dict['rot-z.ce_loss'] *= self._network.exponential_weight
             stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
             total_loss = sum(loss_dict.values())
             self._optimizer.zero_grad(set_to_none=True)

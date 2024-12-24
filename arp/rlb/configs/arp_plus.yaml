@@ -2,9 +2,11 @@ py_module: autoregressive_policy_plus
 
 model:
   weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
-  # weights: ./outputs/default/2024-12-12_09-30/model_20000.pth
+  # weights: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/2024-12-18_16-59/model_53333.pth
 
   hp:
+    rot_z_weight_factor: 1
+    rot_z_weight_max: 2
     moe_weight: 2
     is_moe: true
     moe_multiple_gate: false
@@ -79,7 +81,7 @@ env:
 train:
   bs: 48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 16 # before 100
+  epochs: 32 # before 100
   num_gpus: 1 # before 4
   num_workers: 8 # 8, need larger value
   num_transitions_per_epoch: 160000 # iters=n*epochs/bs
@@ -123,7 +125,8 @@ hydra:
     name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
     chdir: false
   run:
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/${now:%Y-%m-%d_%H-%M}
+    # dir: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/2024-12-18_16-59/
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/10wE/${now:%Y-%m-%d_%H-%M}
   
 output_dir: ${hydra:run.dir} 
 # output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'

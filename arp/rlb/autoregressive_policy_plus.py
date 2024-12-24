@@ -38,6 +38,7 @@ from utils.layers import (
 
 from arp.util.arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
 from autoregressive_policy import MultiViewTransformer, Policy
+import math
 
 
 class PolicyNetwork(nn.Module):
@@ -106,6 +107,13 @@ class PolicyNetwork(nn.Module):
         self.moe_multiple_gate = model_cfg.moe_multiple_gate
         #endregion
         
+        #region parse moe properties
+        self.rot_z_weight_factor: float = model_cfg.rot_z_weight_max
+        self.rot_z_weight_max: float = model_cfg.rot_z_weight_max
+        self.exponential_weight: float = self.rot_z_weight_max
+        self.step:int = 0
+        #endregion
+        
         arp_cfg = ModelConfig(
             n_embd=128,
             embd_pdrop = 0.1, 
@@ -147,6 +155,21 @@ class PolicyNetwork(nn.Module):
         self.block_attn_directions = [(n, f'rot-{c}') for c in ['x', 'y', 'z'] for n in ['grip', 'collision']]
         self.cfg = model_cfg
     
+    def update(self):
+        self.step += 1
+        self.update_weight_exponential()
+    
+    def update_weight_exponential(self):
+        """Linear Decay Weight
+            Gradually reduce the weight over time:
+
+            𝑤(𝑡)=1+(max_weight−1)⋅exp(-alpha*𝑡)
+            
+            t: self.step - the time step for the weight to decay
+            max_weight⋅: self.rot_z_weight_max - the maximum value of W(t)
+            alpha: self.rot_z_weight_factor - how fast the weight decays to one
+        """        
+        self.exponential_weight = 1 + (self.rot_z_weight_max - 1) * math.exp(-self.rot_z_weight_factor * self.step)
     
     def multi_view_coordinate_sampler(self, lst_of_spatial_logits):
         hm_logits = torch.cat([a for a in lst_of_spatial_logits], dim=1)
@@ -228,9 +251,15 @@ class PolicyNetwork(nn.Module):
         self,
         waypoint, # this is groundtruth 3d point
         dims,
-    ): # note: will be called separately for stage 1 / 2
+    ):
+        """
+        Generate action_trans and wpt_img
+            wpt_img: 2D locations (x, y) on rendered images mapped from 3d waypoints (x, y, z), shape (bs, nc, 2)
+            action_trans: normalized gaussian heatmap generated from wp_img, the heatmap is centered on wpt_img, [bs, h*w, 3(nc)]
+        """ 
+        # note: will be called separately for stage 1 / 2
         bs, nc, h, w = dims
-        wpt_img = self.renderer.points3d_to_screen2d(waypoint.unsqueeze(1))
+        wpt_img = self.renderer.points3d_to_screen2d(waypoint.unsqueeze(1)) # (bs, np, num_cameras, 2) # torch.Size([48, 3, 2])
         assert wpt_img.shape[1] == 1
         wpt_img = wpt_img.squeeze(1)  # (bs, num_img, 2)
         action_trans = generate_heatmap_from_screen_pts(
@@ -243,11 +272,16 @@ class PolicyNetwork(nn.Module):
         return action_trans, wpt_img
 
     def render(self, pc, img_feat, mvt: MultiViewTransformer):
+        """Render point cloud pc and image feature im_feat to images
+        """        
+        # renderer(inputs) returns images of shape  [num_images, height, width, channels]
         renderer = self.cpp_renderer if self.render_with_cpp else self.renderer
         with torch.no_grad():
             with autocast(enabled=False):
                 if mvt.add_corr:
+                    # Correlate pc and image feature
                     if mvt.norm_corr:
+                        # normalize pc with max pc
                         img = []
                         for _pc, _img_feat in zip(pc, img_feat):
                             max_pc = 1.0 if len(_pc) == 0 else torch.max(torch.abs(_pc))
@@ -255,10 +289,13 @@ class PolicyNetwork(nn.Module):
                                 renderer(_pc, torch.cat((_pc / max_pc, _img_feat), dim=-1)).unsqueeze(0) # [3, 224, 224, 7], 3 -> views, 7 -> feats
                             )
                     else:
+                        # correlate pc and image feature but do not normalize pc
                         img = [renderer(_pc, torch.cat((_pc, _img_feat), dim=-1)).unsqueeze(0) for _pc, _img_feat in zip(pc, img_feat)]
                 else:
+                    # render image from pc and image feature
                     img = [renderer(_pc, _img_feat).unsqueeze(0) for _pc, _img_feat in zip(pc, img_feat)]
 
+        # Stack the images then permute dimension to [batch_size, num_views, channels, height, width]
         img = torch.cat(img, 0)
         img = img.permute(0, 1, 4, 2, 3) # [1, 3, 7, 224, 224]
 
@@ -338,8 +375,8 @@ class PolicyNetwork(nn.Module):
                         noise = stdv * ((2 * torch.rand(*x.shape, device=x.device)) - 1)
                         x += noise
 
-        # Render noisy visual features for Stage 1
-        img = self.render(pc, img_feat, self.mvt1)
+        # Render images with gt pc and noisy img_feat for Stage 1
+        img = self.render(pc, img_feat, self.mvt1)# img shape [batch_size, num_views, channels, height, width]
         #endregion ###########################
 
         #  extracts visual feature maps
@@ -347,7 +384,7 @@ class PolicyNetwork(nn.Module):
 
         #region Stage 1
         if self.training:
-            # Generate ground truth spatial heatmap
+            # Generate ground truth spatial heatmap  # smooth_spatial_label_stage1 = action_trans.shape([48, 50176, 3]); screen_waypoint_stage1 = wpt_img.shape(([48, 3, 2]))
             smooth_spatial_label_stage1, screen_waypoint_stage1 = self.get_gt_translation_action(waypoint_stage1, dims=(bs, nc, h, w))
             stage1_chk_ids = torch.as_tensor([0], device=dev)[None, :]
 
@@ -383,7 +420,8 @@ class PolicyNetwork(nn.Module):
                                             'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_1[:, view_id],
                                     },
-                                    task_ids=observation['task_idx'])
+                                    task_ids=0#observation['task_idx']
+                                    )
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
                              for hm_logits in self.spatial_logits_buffer], dim=1)
@@ -484,12 +522,14 @@ class PolicyNetwork(nn.Module):
                                                          match_layer='self', contexts={
                                                             'prompt-features': prompt_features,
                                                             'rot-x': action_rot_x[:, None],
-                                                            'rot-y': action_rot_y[:, None], 'rot-z': action_rot_z[:, None]
+                                                            'rot-y': action_rot_y[:, None], 
+                                                            'rot-z': action_rot_z[:, None]
                                                          },
                                                          task_ids=observation['task_idx'])
             loss_dicts.append(loss_dict_gripper)
         else:
             # Generate future waypoint from prompt
+            task_ids = None #TODO find a better way of doing this
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage2-screen-pts'])]
             for view_id in range(3):
@@ -498,7 +538,7 @@ class PolicyNetwork(nn.Module):
                                             'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_2[:, view_id],
                                     },
-                                    task_ids=observation['task_idx'])
+                                    task_ids=task_ids)
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
 
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
@@ -524,7 +564,7 @@ class PolicyNetwork(nn.Module):
                                                     contexts={
                                                         'prompt-features': prompt_features
                                                     },
-                                                    task_ids=observation['task_idx'])
+                                                    task_ids=task_ids)
         #endregion
         
         #region final output
