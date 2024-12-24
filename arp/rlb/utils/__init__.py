@@ -5,7 +5,7 @@ import os.path as osp
 import sys
 from omegaconf import DictConfig, OmegaConf
 
-def configurable(config_path="config/default.yaml"):
+def configurable(config_path='./configs/arp_plus.yaml'):
     def wrapper(main_func):
         config_path_arg = None
         i = 1
