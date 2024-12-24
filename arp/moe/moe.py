@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
-from torch.amp import custom_fwd, custom_bwd
+from torch.cuda.amp import custom_fwd, custom_bwd
 from typing import Any, Dict, List, Optional
 from torch import Tensor
 from dataclasses import dataclass
@@ -167,8 +167,6 @@ class ParallelExperts(nn.Module):
         results = ParallelLinear.apply(inputs, expert_size, self.weight, self.bias)
         return results
 
-
-
 @dataclass
 class Beta:
     max_step_size:int
@@ -217,8 +215,7 @@ class Beta:
             self.value=self.max
             
         return self.value
-              
-    
+                  
 @dataclass
 class Window:
     window_size:int
@@ -311,8 +308,7 @@ class Window:
         self.__iterate_window()
         
         return weighted_average_value
-    
-    
+        
 class MoE(nn.Module):
 
     """Call a Sparsely gated mixture of experts layer with 1-layer Feed-Forward networks as experts.
@@ -368,36 +364,24 @@ class MoE(nn.Module):
         self.w_finetune_MI = w_finetune_MI if w_finetune_MI >= -100 else 0
         
 
-
         if w_finetune_MI < -100 and self.moe_multiple_gate: ## hack
-            self.f_gate = nn.ModuleList([nn.Sequential(
-                                                nn.Linear(input_size,
-                                                      2 * num_experts if noisy_gating else num_experts,
-                                                      bias=False)
-                                        ) for i in range(task_num)])
+            linearlayer = nn.Linear(input_size, 2 * num_experts if noisy_gating else num_experts, bias=False)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer) for _ in range(task_num)])
         elif self.moe_multiple_gate:
-            self.f_gate = nn.ModuleList([nn.Sequential(
-                                            nn.Linear(input_size, input_size//4),
-                                            gating_activation,
-                                            nn.Linear(input_size//4,
-                                                      2 * num_experts if noisy_gating else num_experts,
-                                                      bias=True)
-                                        ) for i in range(task_num)])
+            linearlayer1 = nn.Linear(input_size, input_size//4)
+            linearlayer2 = nn.Linear(input_size//4, 2*num_experts if noisy_gating else num_experts, bias=True)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, gating_activation, linearlayer2) for _ in range(task_num)])
         else:
-            self.f_gate = nn.ModuleList([nn.Sequential(
-                                            nn.Linear(input_size, input_size//4),
-                                            gating_activation,
-                                            nn.Linear(input_size//4,
-                                                      2 * num_experts if noisy_gating else num_experts,
-                                                      bias=True)
-                                        ) for i in range(1)])
+            linearlayer1 = nn.Linear(input_size, input_size//4)
+            linearlayer2 = nn.Linear(input_size//4, 2*num_experts if noisy_gating else num_experts, bias=True)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, gating_activation, linearlayer2)])
         
         # 初始化门控权重
         if self.moe_multiple_gate:
             for i in range(task_num):
                 nn.init.zeros_(self.f_gate[i][-1].weight) 
         else:
-            nn.init.zeros_(self.f_gate[0][-1].weight) 
+            nn.init.zeros_(self.f_gate[0][-1].weight)
 
 
         # VARIABLES FOR ORIGINAL MI LOSS CALCULATION
@@ -636,8 +620,7 @@ class MoE(nn.Module):
             return y, loss
         else:
             return y
-        
-    
+            
 if __name__ == '__main__':
     batch_size = 34
     sequence_length = 1
