@@ -20,22 +20,50 @@ def denorm_rgb(x):
 
 
 def flatten_img_pc_to_points(obs, pcd):
+    """compute pc and img_feat at the shape of torch.Size[(batch_size, num_points(=h*w*num_views), point_dim/img_dim)] eg.([48, 65536, 3])
+
+    Args:
+        obs (list): a nested list of tensor:
+            [camera_view_id, 0] is the tensor of rgb, rgb in shape [bsz, channel, h, w], eg. ([48, 3, 128, 128])
+            [camera_view_id, 1] is the tensor of pcd; pcd in shape [bsz, channel, h, w], eg. ([48, 3, 128, 128])
+            Note camera_view_id is within num_views
+        pcd (list): a nested list of tensor:
+            [camera_view_id] is the tensor of pcd; the same thing as obs[camera_view_id, 1]
+    Returns:
+        pc: the flattened point cloud at shape [(batch_size, num_points(=h*w*num_views), point_dim)] eg.([48, 65536, 3])
+        img_feat: the flattened and normalized (to range [0,1]) rgb at shape [(batch_size, num_points(=h*w*num_views), img_dim)] eg.([48, 65536, 3])
+    """    
+    # get batch size
     bs = obs[0][0].shape[0]
     # concatenating the points from all the cameras
-    # (bs, num_points, 3)
     # 使用 permute 方法改变维度顺序，使高度和宽度成为中间维度，通道数（这里是3，对应x,y,z坐标）成为最后一维。
     # 使用 reshape 方法将每个点云转换成形状为 [batch_size, num_points, 3] 的张量，其中 num_points 是点的数量。
     # 最后使用 torch.cat 沿着第二个维度（即点的数量维度）连接所有点云，得到一个合并后的点云张量
+    # torch.Size([bsz, num_points(=h*w*num_views) ,point_dim]) e.g.([48, 65536, 3])
     pc = torch.cat([p.permute(0, 2, 3, 1).reshape(bs, -1, 3) for p in pcd], 1)
-    _img_feat = [o[0] for o in obs]
+    
+    # obtain rgb into _img_feat: 
+    # len(_img_feat)=4(num of views); 
+    # _img_feat[0].shape = torch.Size([48, 3, 128, 128])
+    _img_feat = [o[0] for o in obs] 
+    # get image dimension i.e. number of channels of image (rgb has a channel of 3)
     img_dim = _img_feat[0].shape[1]
-    # (bs, num_points, 3)
-    img_feat = torch.cat([p.permute(0, 2, 3, 1).reshape(bs, -1, img_dim) for p in _img_feat], 1)
-    img_feat = (img_feat + 1) / 2
+    # flatten the rgb to size ([bsz, num_points(=h*w*num_views) ,img_dim]) eg.torch.Size([48, 65536, 3])
+    img_feat = torch.cat([p.permute(0, 2, 3, 1).reshape(bs, -1, img_dim) for p in _img_feat], 1) 
+    # normalize from [-1,1] to range [0,1]
+    img_feat = (img_feat + 1) / 2 
     return pc, img_feat
 
 
 def clamp_pc_in_bound(pc, img_feat, bounds, skip=False):
+    """Remove all points outside the bounds, return the point-removed pc and img_feat
+
+    Args:
+        pc (list): list of point cloud
+        img_feat (any): image features
+        bounds (tuple or list): (x_min, y_min, z_min, x_max, y_max, z_max)
+        skip (bool, optional): Do nothing if skip is True, return the original pc and img_feat. Defaults to False. 
+    """    
     if skip: return pc, img_feat
     x_min, y_min, z_min, x_max, y_max, z_max = bounds
     inv_pnt = ( # invalid points
