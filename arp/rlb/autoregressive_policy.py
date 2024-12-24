@@ -875,6 +875,7 @@ class Policy:
             loss_dict = self._network(replay_sample)
             loss_dict['rot-z.ce_loss'] *= self._network.exponential_weight
             stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
+            stat_dict['exponential_weight.rot-z.ce_loss'] = self._network.exponential_weight
             total_loss = sum(loss_dict.values())
             self._optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(total_loss).backward()
