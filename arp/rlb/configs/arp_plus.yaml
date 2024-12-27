@@ -1,15 +1,19 @@
 py_module: autoregressive_policy_plus
 
 model:
-  weights: null # ./outputs/arp_plus/2024-12-11_11-31/model_30000.pth
-  # weights: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/2024-12-18_16-59/model_53333.pth
+  weights: null 
+  # weights: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/10wE/2024-12-24_17-15/model_75000.pth
 
   hp:
-    rot_z_weight_factor: 1
-    rot_z_weight_max: 2
-    moe_weight: 2
+    # rot_z_weight_factor: 1
+    # rot_z_weight_max: 2
     is_moe: true
-    moe_multiple_gate: false
+    moe_weight: 2 
+    moe:
+      multiple_gate: false
+      num_experts: 8 #16 #8
+      k: 2 #4 #2 
+      num_shared_experts: 0 # not available yet
     add_corr: true
     add_depth: true
     add_lang: true
@@ -48,7 +52,7 @@ model:
 
     # lr should be thought on per sample basis
     # effective lr is multiplied by bs * num_devices
-    lr: 1.75e-5 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
+    lr: 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
     warmup_steps: 2000
     optimizer_type: lamb
     lr_cos_dec: true
@@ -81,10 +85,10 @@ env:
 train:
   bs: 48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 32 # before 100
+  epochs: 16 # before 100 # 16
   num_gpus: 1 # before 4
   num_workers: 8 # 8, need larger value
-  num_transitions_per_epoch: 160000 # iters=n*epochs/bs
+  num_transitions_per_epoch: 80000 #160000 # iters=n*epochs/bs
   disp_freq: 100
   cached_dataset_path: null
   save_freq: 5000 # before 10000
@@ -122,11 +126,12 @@ eval:
 
 hydra:
   job:
-    name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
+    name: test # default # arp_plus # eval.arp_plus
+    # name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
     chdir: false
   run:
-    # dir: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/2024-12-18_16-59/
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/10wE/${now:%Y-%m-%d_%H-%M}
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}-53333/${now:%Y-%m-%d_%H-%M}
+    # dir: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/10wE/2024-12-24_17-15
   
 output_dir: ${hydra:run.dir} 
 # output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'

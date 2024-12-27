@@ -8,9 +8,184 @@ import numpy as np
 import random
 from torch.cuda.amp import custom_fwd, custom_bwd
 from typing import Any, Dict, List, Optional
-from torch import Tensor
+from torch import Tensor,Callable
 from dataclasses import dataclass
 
+@dataclass
+class MoEArgs():
+    input_size:int
+    head_size:int 
+    num_experts:int=8
+    k:int=2
+    limit_k:int=0
+    task_num:int=9
+    gating_activation:Any=nn.GELU()
+    moe_multiple_gate:bool=False
+    bias:bool=True
+    activation:Any=nn.Sequential(nn.GELU())
+    moe_cfg:Dict=None
+    
+@dataclass 
+class SDPMoEArgs(MoEArgs):
+    w_MI:float=0
+    w_H:float=0
+    w_finetune_MI:float=0
+    noisy_gating:bool=False
+    
+
+@dataclass 
+class DeepSeekMoEArgs(MoEArgs):
+    pass
+    
+@dataclass
+class DeepSeekMoEBlockArgs(DeepSeekMoEArgs):
+    num_moe_layers:int=2    
+             
+@dataclass
+class Beta:
+    max_step_size:int
+    max:float=0.95
+    min:float=0.9
+    step_size:float=None # (max-min)/max_step_size
+    window_diff_factor:float = 7.0 # the factor multiplied with windows diff
+    window_diff_func:Callable[[torch.Tensor], torch.Tensor]=torch.tanh # the function applied on windows diff, tanh effectively maps diff to [0,1]
+    value:float=None # the beta value, default to Beta.min
+    
+    def __post_init__(self):
+        self.value = self.min
+        if self.step_size == None:
+            self.step_size = (self.max-self.min)/self.max_step_size
+            
+    
+    def calculate(self, current_step:int=None, window_diff:float=None)->float:
+        """Calculate the beta value according to step size
+
+        Args:
+            current_step (int): the current step of calculation, at range [1, self.max_step_size]
+            window_diff (float): the normalized difference between two consequential windows, at range [0.0, 1.0]
+        Returns:
+            float: the beta weight at range [self.min, self.max]
+        """      
+        assert current_step is None or current_step > 0, f'current_step must be greater than zero, but current_step={current_step} is given.'
+        
+        if window_diff is not None and current_step:
+            # at the case when the window step havent hit 20
+            # and dynamic beta computation is required
+            self.value= min(self.min + \
+                self.step_size * self.window_diff_factor * self.window_diff_func(window_diff) * current_step, 
+                self.max)  
+        elif current_step:
+            # at the case when the window step havent hit 20
+            # and no dynamic beta computation required
+            self.value= min(self.min + \
+                self.step_size * current_step, 
+                self.max)   
+        elif window_diff is not None:
+            # at the case when the window step hit 20 once 
+            # and beta uses windows diff to compute beta dynamically            
+            self.value= min(self.min + \
+                self.step_size * self.window_diff_func(window_diff)* self.window_diff_factor, 
+                self.max)   
+        else:
+            # at the case when the window step hit 20 once
+            # no dynamic beta required
+            self.value=self.max
+            
+        return self.value
+                  
+@dataclass
+class Window:
+    window_size:int
+    apply_dynamic_beta_flag:bool = False
+    beta:Beta = None
+    __history:Tensor = None
+    __window_step:int = 1
+    __first_window_flag:bool = True
+    __initialize_flag:bool = True
+    
+    
+    def __post_init__(self):
+        # After the object is initialized, we can safely use the window_size field
+        self.beta = Beta(max_step_size=self.window_size * 2)
+
+
+    def __get_current_window(self):
+        if self.__first_window_flag:
+            return self.__history[:self.__window_step]
+        else:
+            return self.__history[:self.window_size]
+    
+    def __get_previous_window(self):
+        return self.__history[self.window_size:]
+
+    def __iterate_window(self):
+        if self.__window_step == self.window_size*2:
+            # clear steps when the step is equal to the length of history. 
+            # It measures when the elements in the history are full-filled/refreshed
+            self.__clear_step()
+        self.__window_step += 1
+        
+    def __clear_step(self):
+        if self.__first_window_flag:
+            self.__first_window_flag = False
+        self.__window_step = 0
+    
+    def init_history(self, value_size:Union[list,tuple,torch.Size], device:torch.device=None):
+        """Initialize container for values, given the size of a single value.
+           This function will exit if history is already initialized.
+
+        Args:
+            value_size (list or tuple or torch.size): The size of the value to be stored
+        """        
+        if self.__initialize_flag:
+            self.__initialize_flag = False
+            if isinstance(value_size, (torch.Size, tuple)):
+                value_size = list(value_size)
+            value_size.insert(0, self.window_size*2)
+            self.__history = torch.zeros(size=value_size, device=device)
+        
+    def step(self, value:Tensor)->Tensor:
+        """Compute the moving beta-weighted average value at history based on:
+               output = beta * average window value + (1 - beta) * current value
+
+        Args:
+            value (Tensor): The value to recorded into history and windowed
+
+        Returns:
+            Tensor: a weighted moving windowed value, same shape as the input value.
+        """
+        # Add dimension if ndim is one. The operation is done for the torch.cat
+        if value.ndim == 1:
+            value = value.unsqueeze(0)
+            
+        # roll the history by insert the new value at first and remove the oldest value
+        self.__history = torch.cat((value, self.__history[:-1]), dim=0)
+        
+        # get current window of history
+        current_window = self.__get_current_window()
+        
+        # whether or not to parse current window step to beta calculator
+        beta_step = self.__window_step if self.__first_window_flag else self.window_size
+        
+        # the following decides whether and when to parse windows difference to beta calculator
+        get_diff_flag = self.__window_step == self.window_size*2 and self.apply_dynamic_beta_flag
+        
+        # Get norm of windows difference
+        frobenius_norm = torch.norm(current_window-self.__get_previous_window(), p='fro') if get_diff_flag else None
+        
+        # Calculate beta value
+        self.beta.calculate(beta_step, frobenius_norm)
+        
+        # Compute a moving pi with beta 
+        weighted_average_value = (self.beta.value * current_window.mean(0) + (1 - self.beta.value) * value).flatten()
+        
+        # Iterate or reset steps. 
+        # Note: call this after obtaining the step value 
+        # because it will be updated after the function
+        self.__iterate_window()
+        
+        return weighted_average_value
+             
 class ParallelLinear(torch.autograd.Function):
 
     @staticmethod
@@ -167,148 +342,6 @@ class ParallelExperts(nn.Module):
         results = ParallelLinear.apply(inputs, expert_size, self.weight, self.bias)
         return results
 
-@dataclass
-class Beta:
-    max_step_size:int
-    max:float=0.95
-    min:float=0.9
-    step_size:float=None # (max-min)/max_step_size
-    window_diff_factor:float = 7.0 # the factor multiplied with windows diff
-    window_diff_func=torch.tanh # the function applied on windows diff, tanh effectively maps diff to [0,1]
-    value:float=min # the beta value, default is min
-    
-    def __post_init__(self):
-        if self.step_size == None:
-            self.step_size = (self.max-self.min)/self.max_step_size
-            
-    
-    def calculate(self, current_step:int=None, window_diff:float=None)->float:
-        """Calculate the beta value according to step size
-
-        Args:
-            current_step (int): the current step of calculation, at range [1, self.max_step_size]
-            window_diff (float): the normalized difference between two consequential windows, at range [0.0, 1.0]
-        Returns:
-            float: the beta weight at range [self.min, self.max]
-        """      
-        if window_diff and current_step:
-            # at the case when the window step havent hit 20
-            # and dynamic beta computation is required
-            self.value= min(self.min + \
-                self.step_size * self.window_diff_factor * self.window_diff_func(window_diff) * current_step, 
-                self.max)  
-        elif current_step:
-            # at the case when the window step havent hit 20
-            # and no dynamic beta computation required
-            self.value= min(self.min + \
-                self.step_size * current_step, 
-                self.max)   
-        elif window_diff:
-            # at the case when the window step hit 20 once 
-            # and beta uses windows diff to compute beta dynamically            
-            self.value= min(self.min + \
-                self.step_size * self.window_diff_func(window_diff)* self.window_diff_factor, 
-                self.max)   
-        else:
-            # at the case when the window step hit 20 once
-            # no dynamic beta required
-            self.value=self.max
-            
-        return self.value
-                  
-@dataclass
-class Window:
-    window_size:int
-    apply_dynamic_beta_flag:bool = False
-    beta:Beta = None
-    __history:Tensor = None
-    __window_step:int = 1
-    __first_window_flag:bool = True
-    __initialize_flag:bool = True
-    
-    
-    def __post_init__(self):
-        # After the object is initialized, we can safely use the window_size field
-        self.beta = Beta(max_step_size=self.window_size * 2)
-
-
-    def __get_current_window(self):
-        if self.__first_window_flag:
-            return self.__history[:self.__window_step]
-        else:
-            return self.__history[:self.window_size]
-    
-    def __get_previous_window(self):
-        return self.__history[self.window_size:]
-
-    def __iterate_window(self):
-        if self.__window_step == self.window_size*2:
-            # clear steps when the step is equal to the length of history. 
-            # It measures when the elements in the history are full-filled/refreshed
-            self.__clear_step()
-        self.__window_step += 1
-        
-    def __clear_step(self):
-        if self.__first_window_flag:
-            self.__first_window_flag = False
-        self.__window_step = 0
-    
-    def init_history(self, value_size:Union[list,tuple,torch.Size], device:torch.device=None):
-        """Initialize container for values, given the size of a single value.
-           This function will exit if history is already initialized.
-
-        Args:
-            value_size (list or tuple or torch.size): The size of the value to be stored
-        """        
-        if self.__initialize_flag:
-            self.__initialize_flag = False
-            if isinstance(value_size, (torch.Size, tuple)):
-                value_size = list(value_size)
-            value_size.insert(0, self.window_size*2)
-            self.__history = torch.zeros(size=value_size, device=device)
-        
-    def step(self, value:Tensor)->Tensor:
-        """Compute the moving beta-weighted average value at history based on:
-               output = beta * average window value + (1 - beta) * current value
-
-        Args:
-            value (Tensor): The value to recorded into history and windowed
-
-        Returns:
-            Tensor: a weighted moving windowed value, same shape as the input value.
-        """
-        # Add dimension if ndim is one. The operation is done for the torch.cat
-        if value.ndim == 1:
-            value = value.unsqueeze(0)
-            
-        # roll the history by insert the new value at first and remove the oldest value
-        self.__history = torch.cat((value, self.__history[:-1]), dim=0)
-        
-        # get current window of history
-        current_window = self.__get_current_window()
-        
-        # whether or not to parse current window step to beta calculator
-        beta_step = self.__window_step if self.__first_window_flag else self.window_size
-        
-        # the following decides whether and when to parse windows difference to beta calculator
-        get_diff_flag = self.__window_step == self.window_size*2 and self.apply_dynamic_beta_flag
-        
-        # Get norm of windows difference
-        frobenius_norm = torch.norm(current_window-self.__get_previous_window(), p='fro') if get_diff_flag else None
-        
-        # Calculate beta value
-        self.beta.calculate(beta_step, frobenius_norm)
-        
-        # Compute a moving pi with beta 
-        weighted_average_value = (self.beta.value * current_window.mean(0) + (1 - self.beta.value) * value).flatten()
-        
-        # Iterate or reset steps. 
-        # Note: call this after obtaining the step value 
-        # because it will be updated after the function
-        self.__iterate_window()
-        
-        return weighted_average_value
-        
 class MoE(nn.Module):
 
     """Call a Sparsely gated mixture of experts layer with 1-layer Feed-Forward networks as experts.
@@ -324,22 +357,28 @@ class MoE(nn.Module):
     def __init__(self,  
                  input_size:int, 
                  head_size:int, 
-                 num_experts:int, 
-                 k:int, 
-                 w_MI:float=0, 
-                 w_H:float=0.1, 
-                 w_finetune_MI:float=0, 
+                 num_experts:int=8, 
+                 k:int=2, 
                  limit_k:int=0, 
                  task_num:int=9, 
-                 noisy_gating:bool=True, 
                  gating_activation=nn.GELU(), 
                  moe_multiple_gate:bool=False,
                  bias=True, 
                  activation=nn.Sequential(nn.GELU()),
+                 moe_cfg=None
                  ):
         super().__init__()
+        # overwrite arguments with config if provided
+        if moe_cfg:
+            moe_multiple_gate = moe_cfg.multiple_gate
+            num_experts = moe_cfg.num_experts
+            k = moe_cfg.k
+            num_shared_experts = moe_cfg.num_shared_experts
         
-        self.noisy_gating = noisy_gating
+        assert activation!=None, 'Activation function cannot be None'
+        assert gating_activation!=None, 'gating_activation function cannot be None'
+        
+        # Write to arguments to class
         self.num_experts = num_experts
         self.input_size = input_size
         self.head_size = head_size
@@ -351,39 +390,44 @@ class MoE(nn.Module):
         self.activation = activation
         self.task_num = task_num
         self.moe_multiple_gate = moe_multiple_gate
-        
-        self.window_length = 20
-        self.window = Window(self.window_length)
-        
-        assert activation!=None, 'Activation function cannot be None'
-        assert gating_activation!=None, 'gating_activation function cannot be None'
-        
-        
+        self.gating_activation = gating_activation
+
+     
+
+class SDPMOE(MoE):
+    def __init__(self, 
+                 w_MI:float=0, 
+                 w_H:float=0, 
+                 w_finetune_MI:float=0, 
+                 noisy_gating:bool=False, 
+                 **kwargs):
+        super().__init__(**kwargs)
+                
+        self.noisy_gating = noisy_gating
         self.w_MI = w_MI
         self.w_H = w_H
         self.w_finetune_MI = w_finetune_MI if w_finetune_MI >= -100 else 0
         
-
-        if w_finetune_MI < -100 and self.moe_multiple_gate: ## hack
-            linearlayer = nn.Linear(input_size, 2 * num_experts if noisy_gating else num_experts, bias=False)
-            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer) for _ in range(task_num)])
-        elif self.moe_multiple_gate:
-            linearlayer1 = nn.Linear(input_size, input_size//4)
-            linearlayer2 = nn.Linear(input_size//4, 2*num_experts if noisy_gating else num_experts, bias=True)
-            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, gating_activation, linearlayer2) for _ in range(task_num)])
-        else:
-            linearlayer1 = nn.Linear(input_size, input_size//4)
-            linearlayer2 = nn.Linear(input_size//4, 2*num_experts if noisy_gating else num_experts, bias=True)
-            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, gating_activation, linearlayer2)])
+        hidden_size = max(self.input_size//4, 1) # in case input size < 4
+        if w_finetune_MI < -100 and self.moe_multiple_gate: # multi gate, w_finetune_MI < -100
+            linearlayer = nn.Linear(self.input_size, 2 * self.num_experts if self.noisy_gating else self.num_experts, bias=False)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer) for _ in range(self.task_num)])
+        elif self.moe_multiple_gate: # multi gate
+            linearlayer1 = nn.Linear(self.input_size, hidden_size)
+            linearlayer2 = nn.Linear(hidden_size, 2*self.num_experts if self.noisy_gating else self.num_experts, bias=True)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, self.gating_activation, linearlayer2) for _ in range(self.task_num)])
+        else: # single gate
+            linearlayer1 = nn.Linear(self.input_size, hidden_size)
+            linearlayer2 = nn.Linear(hidden_size, 2*self.num_experts if self.noisy_gating else self.num_experts, bias=True)
+            self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, self.gating_activation, linearlayer2)])
         
         # 初始化门控权重
         if self.moe_multiple_gate:
-            for i in range(task_num):
+            for i in range(self.task_num):
                 nn.init.zeros_(self.f_gate[i][-1].weight) 
         else:
             nn.init.zeros_(self.f_gate[0][-1].weight)
-
-
+        
         # VARIABLES FOR ORIGINAL MI LOSS CALCULATION
         # Buffers are tensors that are part of the model's state 
         # but are not learnable parameters (i.e., they are not updated by backpropagation).
@@ -394,11 +438,10 @@ class MoE(nn.Module):
         self.task_gate_freq = [0] * self.task_num
         self.topk_acc_probs = [0] * self.task_num
         self.token_probs = [0] * self.task_num
-     
+    
     def extra_repr(self):
-        return 'k={}, noisy_gating={}'.format(
-            self.k, self.noisy_gating)
-
+        return f'k={self.k}, task_num={self.task_num}, num_expert={self.num_experts}, num_gate={len(self.f_gate)}'
+        
     def get_MIloss(self, scores:Tensor, task_bh) ->Tensor:
         """Compute Mutual Information (MI) Loss for the current MoE layer. 
         Mutual Information is defined as:
@@ -453,7 +496,7 @@ class MoE(nn.Module):
         loss = loss.unsqueeze(0)
         print(loss)
         return loss
-
+ 
     def top_k_gating(self, x:Tensor, task_bh:int, skip_mask:Tensor=None, sample_topk:int=0, noise_epsilon:float=1e-2)->Tensor:
         """Noisy top-k gating.
         See paper: https://arxiv.org/abs/1701.06538.
@@ -505,8 +548,58 @@ class MoE(nn.Module):
             compute_gating(self.k, scores, top_k_gates, top_k_indices)
         
         return scores
+
+    def forward(self, x, task_bh, skip_mask=None, sample_topk=0, multiply_by_gates=True):
+        bsz, length, emb_size = x.size()
+        x = x.reshape(-1, emb_size)
+        if skip_mask is not None:
+            skip_mask = skip_mask.view(-1, 1)
+        topk_weight = self.top_k_gating(x, task_bh, skip_mask,  sample_topk=sample_topk)
+        loss = self.get_MIloss(topk_weight, task_bh)
+        
+        
+        h = self.experts(x[self.batch_index], self.expert_size)
+        h = self.activation(h)
+        expert_outputs = self.output_experts(h, self.expert_size)
+
+        if multiply_by_gates:
+            expert_outputs = expert_outputs * self.batch_gates[:, None]
+
+        # index expert output y based on batch index, and shape it to the original batch
+        zeros = torch.zeros(
+            (bsz * length, self.input_size), 
+            dtype=expert_outputs.dtype, 
+            device=expert_outputs.device)
+        y = zeros.index_add(0, self.batch_index, expert_outputs)
+        y = y.view(bsz, length, self.input_size)
+        return y, loss
     
-    def top_k_gating_deepseek(self, x:Tensor, task_bh:Tensor)->Tensor:
+       
+class DeepSeekMoE(MoE):
+    def __init__(self, **kwargs:DeepSeekMoEArgs):
+        super().__init__(**kwargs)
+        self.window_length = 20
+        self.window = Window(self.window_length)
+        
+        hidden_size = max(self.input_size//4, 1)
+        linearlayer1 = nn.Linear(self.input_size, hidden_size)
+        linearlayer2 = nn.Linear(hidden_size, self.num_experts, bias=True)
+        self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, 
+                                                   self.gating_activation, 
+                                                   linearlayer2) 
+                                     for _ in range(self.task_num if self.moe_multiple_gate else 1)])
+    
+        # 初始化门控权重
+        if self.moe_multiple_gate:
+            for i in range(self.task_num):
+                nn.init.zeros_(self.f_gate[i][-1].weight) 
+        else:
+            nn.init.zeros_(self.f_gate[0][-1].weight)
+
+    def extra_repr(self):
+        return f'k={self.k}, task_num={self.task_num}, num_expert={self.num_experts}, num_gate={len(self.f_gate)}'        
+
+    def top_k_gating(self, x:Tensor, task_bh:Tensor)->Tensor:
         bsz, seq_len, h = x.shape  
         # Generate a mask corresponding to the task id
         if self.moe_multiple_gate:
@@ -561,35 +654,7 @@ class MoE(nn.Module):
         
         return topk_idx, topk_weight, aux_loss
     
-    def sdpforward(self, x, task_bh, skip_mask=None, sample_topk=0, multiply_by_gates=True):
-        bsz, length, emb_size = x.size()
-        x = x.reshape(-1, emb_size)
-        if skip_mask is not None:
-            skip_mask = skip_mask.view(-1, 1)
-        topk_weight = self.top_k_gating(x, task_bh, skip_mask,  sample_topk=sample_topk)
-        loss = self.get_MIloss(topk_weight, task_bh)
-        
-        
-        h = self.experts(x[self.batch_index], self.expert_size)
-        h = self.activation(h)
-        expert_outputs = self.output_experts(h, self.expert_size)
-
-        if multiply_by_gates:
-            expert_outputs = expert_outputs * self.batch_gates[:, None]
-
-        # index expert output y based on batch index, and shape it to the original batch
-        zeros = torch.zeros(
-            (bsz * length, self.input_size), 
-            dtype=expert_outputs.dtype, 
-            device=expert_outputs.device)
-        y = zeros.index_add(0, self.batch_index, expert_outputs)
-        y = y.view(bsz, length, self.input_size)
-        return y, loss
-    
-    def forward(self, x, task_bh, skip_mask=None, sample_topk=0, multiply_by_gates=True):
-        return self.deepseekforward(x, task_bh)
-        # return self.sdpforward(x, task_bh, skip_mask, sample_topk, multiply_by_gates)
-    
+      
     def get_task_mask(self, x:Tensor, task_ids:Tensor):
         # Find unique categories
         unique_categories:Tensor = torch.unique(task_ids) # shape: [number_categories] 
@@ -599,11 +664,11 @@ class MoE(nn.Module):
 
         return unique_categories, masks
     
-    def deepseekforward(self, x:Tensor, task_bh:Tensor):    
+    def forward(self, x:Tensor, task_bh:Tensor):    
         bsz, length, emb_size = x.size()
         orig_shape = x.shape
         
-        topk_idx, topk_weight, loss = self.top_k_gating_deepseek(x, task_bh)
+        topk_idx, topk_weight, loss = self.top_k_gating(x, task_bh)
         x = x.view(-1, emb_size)
         h = self.experts(x[self.batch_index], self.expert_size)
         activated_h = self.activation(h)
@@ -620,29 +685,54 @@ class MoE(nn.Module):
             return y, loss
         else:
             return y
-            
+         
+
+   
+class DeepSeekMoEBlock(nn.Module):
+    def __init__(self,
+                 num_moe_layers:int=2,
+                 **kwargs:DeepSeekMoEArgs):
+        super(DeepSeekMoEBlock, self).__init__()
+        self.moe_layers = nn.ModuleList([DeepSeekMoE(**kwargs) for _ in range(num_moe_layers)])
+    def forward(self, x):
+        aux_losses = []
+        for moe_layer in self.moe_layers:
+            x, aux_loss = moe_layer(x)
+            aux_losses.append(aux_loss)
+        return x, sum(aux_losses)
+    
+class MoEMLP(nn.Module):
+    def __init__(self, **kwargs:DeepSeekMoEBlockArgs):
+        super(MoEMLP, self).__init__()
+        self.layers = nn.Sequential(
+            DeepSeekMoEBlock(**kwargs),
+            nn.GELU,
+            DeepSeekMoEBlock(**kwargs)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+              
 if __name__ == '__main__':
     batch_size = 34
     sequence_length = 1
     input_size = 3
-    
-    model = MoE( # 这里加入了moe layer
-            input_size, # input_size 
-            input_size //2, # head_size
-            8, # num_experts
-            2, # topk’s k
-            bias=True,
-            acc_aux_loss=True,
-            w_MI=0.0005, #0.0005
-            w_finetune_MI=0,
-            task_num=5, # 任务数量，暂时定为5个
-            activation=nn.Sequential(
-                nn.GELU(),
-            ),
-            noisy_gating=False,
-        )
+    model = DeepSeekMoE( 
+            **vars(DeepSeekMoEArgs(input_size=input_size,
+                           head_size=input_size//2,
+                           num_experts=8,
+                           k=2,
+                           bias=True,
+                           task_num=5,
+                           activation=nn.Sequential(nn.GELU()),
+                           )
+                   )
+            )
 
     input_data = torch.randn(batch_size, sequence_length, input_size)
 
-    output, loss = model(input_data,  int(0), skip_mask=None)####
-    print(loss.shape)
+    DeepSeekMoE.forward
+    output, loss = model(input_data,  int(0))
+    print(loss)
+    print(output.shape)

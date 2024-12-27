@@ -102,15 +102,21 @@ class PolicyNetwork(nn.Module):
         # then produce rot and grip separately
 
         #region parse moe properties
-        self.moe_weight = model_cfg.moe_weight
-        self.is_moe = model_cfg.is_moe
-        self.moe_multiple_gate = model_cfg.moe_multiple_gate
+        self.is_moe = model_cfg.is_moe if hasattr(model_cfg, "is_moe") else False
+        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_moe") else None
+        self.moe_multiple_gate = model_cfg.moe_multiple_gate if hasattr(model_cfg, "moe_multiple_gate") else False
+        self.moe_cfg = model_cfg.moe if hasattr(model_cfg, "moe") else None
         #endregion
         
         #region parse moe properties
-        self.rot_z_weight_factor: float = model_cfg.rot_z_weight_max
-        self.rot_z_weight_max: float = model_cfg.rot_z_weight_max
-        self.exponential_weight: float = self.rot_z_weight_max
+        if hasattr(model_cfg, "rot_z_weight_factor"): # compatible with the old config
+            self.use_exponential_weight_flag: bool = True
+            self.rot_z_weight_factor: float = model_cfg.rot_z_weight_factor
+            self.rot_z_weight_max: float = model_cfg.rot_z_weight_max
+            self.exponential_weight: float = self.rot_z_weight_max
+        else:
+            self.use_exponential_weight_flag: bool = False
+            self.exponential_weight: float = 1.0
         self.step:int = 0
         #endregion
         
@@ -147,6 +153,7 @@ class PolicyNetwork(nn.Module):
             
             is_moe=self.is_moe,
             moe_multiple_gate=self.moe_multiple_gate,
+            moe_cfg=self.moe_cfg,
             
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
@@ -157,7 +164,8 @@ class PolicyNetwork(nn.Module):
     
     def update(self):
         self.step += 1
-        self.update_weight_exponential()
+        if self.use_exponential_weight_flag:
+           self.update_weight_exponential()
     
     def update_weight_exponential(self):
         """Linear Decay Weight
@@ -365,7 +373,6 @@ class PolicyNetwork(nn.Module):
         bs = len(pc)
 
         # Combine waypoints and apply noise augmentation during training
-        # TODO: x+=noise才会改变原来的元素
         if self.training:
             waypoint_stage1 = torch.cat(waypoint_stage1, axis=0).clone().detach()
             if self.point_augment_noise != 0:

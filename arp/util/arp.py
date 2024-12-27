@@ -158,6 +158,7 @@ class ChunkTransformerLayer(nn.Module):
                  conditional=False, AdaLN=False, norm_before_AdaLN=False,
                  is_moe:bool=False, # Added boolean to use moe to replace Mlp(FFN)
                  moe_multiple_gate:bool=False,
+                 moe_cfg=None
                  ):
         super().__init__()
         # layer normalization: 
@@ -177,18 +178,12 @@ class ChunkTransformerLayer(nn.Module):
             from arp.rlb.utils_with_rlbench import TASK_TO_ID
             self.propagate = MoE(input_size=hidden_size,
                            head_size=mlp_hidden_dim,
-                           num_experts=8,
-                           k=2,
-                           w_MI=0,
-                           w_H=0,
-                           w_finetune_MI=0,
-                           limit_k=0,
                            task_num=len(TASK_TO_ID),
-                           noisy_gating=False,
                            moe_multiple_gate=moe_multiple_gate,
+                           moe_cfg=moe_cfg
                         )
         else:
-            self.propagate = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
+            self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
                         drop=mlp_dropout)
             
         self.attn = Attention(hidden_size, num_heads, **attn_kwargs)
@@ -262,7 +257,7 @@ class ChunkTransformerLayer(nn.Module):
                     propagate_result, aux_loss = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
                     aux_losses[i]=aux_loss
                 else:
-                    propagate_result = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
+                    propagate_result = self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
                 x_tmp[i] = propagate_result
             xs = x_tmp
         else:
@@ -274,7 +269,7 @@ class ChunkTransformerLayer(nn.Module):
                     propagate_result, aux_loss = self.propagate(self.ln_mlp(x), task_ids)
                     aux_losses[i]=aux_loss
                 else:
-                    propagate_result = self.propagate(self.ln_mlp(x))
+                    propagate_result = self.mlp(self.ln_mlp(x))
                 x_tmp[i] = propagate_result
             xs = x_tmp
         return xs, aux_losses
@@ -294,14 +289,14 @@ class ChunkTransformerLayer(nn.Module):
             if self.is_moe:
                 x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)[0]
             else:
-                x = x + gate_mlp * self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
+                x = x + gate_mlp * self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
         else:
             x = x + cond_attn
             x = x + self.attn(self.ln_attn(x), attn_mask=mask)
             if self.is_moe:
                 x = x + self.propagate(self.ln_mlp(x), task_ids)[0]
             else:
-                x = x + self.propagate(self.ln_mlp(x))
+                x = x + self.mlp(self.ln_mlp(x))
                 
         return x
 
@@ -1082,6 +1077,7 @@ class AutoRegressivePolicy(nn.Module):
         #region moe properties 
         self.is_moe = cfg.is_moe
         self.moe_multiple_gate = cfg.moe_multiple_gate
+        self.moe_cfg = cfg.moe_cfg
         #endregion
         
         for tk_id, tk in enumerate(cfg.tokens):
@@ -1104,6 +1100,7 @@ class AutoRegressivePolicy(nn.Module):
                 conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False),
                 is_moe=self.is_moe,
                 moe_multiple_gate=self.moe_multiple_gate,
+                moe_cfg=self.moe_cfg
             )
             self.blocks.append(layer)
 
