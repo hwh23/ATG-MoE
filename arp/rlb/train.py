@@ -45,7 +45,7 @@ def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, ra
         if writer:# add loss dict to tensorboard
             # writer.add_scalars("losses", loss_dict, steps)
             for k, v in loss_dict.items():
-                if k=="v1_norm" or k=="v2_norm":
+                if k=="v1_norm" or k=="v2_norm" or k=="exponential_weight.rot-z.ce_loss":
                     writer.add_scalar(f"stat/{k}", v, steps) 
                 else:                  
                     writer.add_scalar(f"loss/{k}", v, steps) 
