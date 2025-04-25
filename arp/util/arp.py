@@ -876,7 +876,7 @@ class GMMPredictor(TokenPredictorInterface):
                 result.append(d.mean)
         return result
 
-
+# TODO loss似乎在这里定义与计算
 @register_token_predictor('class')
 class ClassPredictor(TokenPredictorInterface):
     IS_CONTINUOUS = False
@@ -1238,6 +1238,7 @@ class AutoRegressivePolicy(nn.Module):
 
         # interleave forward 
         # 这里调用了forward
+        # self.forward
         (embs_star, embs_hat), aux_loss = self([embs_star, embs_hat], chk_ids, contexts=contexts, layer_ids=layer_ids,
                                    dependency_attn_mask=dependency_attn_mask, training=True, task_ids=task_ids)
 

@@ -262,8 +262,8 @@ class PolicyNetwork(nn.Module):
     ):
         """
         Generate action_trans and wpt_img
-            wpt_img: 2D locations (x, y) on rendered images mapped from 3d waypoints (x, y, z), shape (bs, nc, 2)
             action_trans: normalized gaussian heatmap generated from wp_img, the heatmap is centered on wpt_img, [bs, h*w, 3(nc)]
+            wpt_img: 2D locations (x, y) on rendered images mapped from 3d waypoints (x, y, z), shape (bs, nc, 2)
         """ 
         # note: will be called separately for stage 1 / 2
         bs, nc, h, w = dims
@@ -396,6 +396,7 @@ class PolicyNetwork(nn.Module):
             stage1_chk_ids = torch.as_tensor([0], device=dev)[None, :]
 
             # the 0, 0 are dummy input
+            # 这里的seq[0,0,2]
             seq = torch.as_tensor([0, 0, self.policy.token_name_2_ids['stage1-screen-pts']], device=dev).reshape(1, 1, 3).repeat(bs, 1, 1)
             
             # Compute loss for each camera view 

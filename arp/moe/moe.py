@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 from torch import Tensor,Callable
 from dataclasses import dataclass
 
+from timm.models.vision_transformer import Mlp
+
 @dataclass
 class MoEArgs():
     input_size:int
@@ -383,6 +385,7 @@ class MoE(nn.Module):
         self.input_size = input_size
         self.head_size = head_size
         self.bias = bias
+        # TODO Experts重新设计
         self.experts = ParallelExperts(num_experts, input_size, head_size, bias)
         self.output_experts = ParallelExperts(num_experts, head_size, input_size, bias)
         self.k = min(k, self.num_experts)
@@ -582,6 +585,18 @@ class DeepSeekMoE(MoE):
         self.window = Window(self.window_length)
         
         hidden_size = max(self.input_size//4, 1)
+
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+
+        # self.experts= nn.ModuleList([Mlp(in_features=self.input_size,
+        #                                   hidden_features=int(hidden_size * 4.0), 
+        #                                   act_layer=approx_gelu, 
+        #                                   drop=0.1)
+        #                                   for _ in range(self.num_experts)])
+        
+        self.shared_experts = Mlp(in_features=self.input_size, hidden_features=int(hidden_size * 4.0), act_layer=approx_gelu,
+                                drop=0.1)
+
         linearlayer1 = nn.Linear(self.input_size, hidden_size)
         linearlayer2 = nn.Linear(hidden_size, self.num_experts, bias=True)
         self.f_gate = nn.ModuleList([nn.Sequential(linearlayer1, 
@@ -607,9 +622,19 @@ class DeepSeekMoE(MoE):
             # logits = torch.zeros(size=[bsz, seq_len, self.num_experts],device=x.device)
             # for i, task_mask in enumerate(task_masks):
             #     logits += self.f_gate[categories[i]](x * task_mask.view(bsz, 1,1))
-            masked_x = x.unsqueeze(0) * task_masks.view(*task_masks.shape,1,1)  # masked_x.Shape: [num_categories, bsz, seq_len, num_tasks]
-            all_logits = self.f_gate[categories](masked_x)
-            logits = all_logits.sum(0)
+            masked_x = x.unsqueeze(0) * task_masks.unsqueeze(-1).unsqueeze(-1)  # masked_x.Shape: [num_categories, bsz, seq_len, num_tasks]
+            # 将unique_categories从tensor转换为整数列表
+            categories_list = [c.item() for c in categories]
+            # 使用列表推导式生成所有门控函数的输出
+            all_logits = []
+            for i, category in enumerate(categories_list):
+                # 获取对应的门控函数
+                gate = self.f_gate[category]
+                # 计算该类别的logits
+                logits = gate(masked_x[i])
+                all_logits.append(logits)
+            # 将所有logits相加
+            logits = torch.stack(all_logits, dim=0).sum(0)
         else:
             logits = self.f_gate[0](x)
         
@@ -667,12 +692,14 @@ class DeepSeekMoE(MoE):
     def forward(self, x:Tensor, task_bh:Tensor):    
         bsz, length, emb_size = x.size()
         orig_shape = x.shape
+        identity = x
         
         topk_idx, topk_weight, loss = self.top_k_gating(x, task_bh)
         x = x.view(-1, emb_size)
         h = self.experts(x[self.batch_index], self.expert_size)
         activated_h = self.activation(h)
         expert_outputs = self.output_experts(activated_h, self.expert_size)
+        
         # index expert output y based on batch index, and shape it to the original batch
         zeros = torch.zeros(
             (bsz * length, self.input_size), 
@@ -680,6 +707,9 @@ class DeepSeekMoE(MoE):
             device=expert_outputs.device)
         y = zeros.index_add(0, self.batch_index, expert_outputs)
         y = y.view(bsz, length, self.input_size)
+
+        # TODO weight
+        y = 0.4 * y + 0.6 * self.shared_experts(identity)
         
         if self.training:
             return y, loss

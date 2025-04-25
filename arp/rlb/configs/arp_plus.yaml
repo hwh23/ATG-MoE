@@ -7,12 +7,12 @@ model:
   hp:
     # rot_z_weight_factor: 1
     # rot_z_weight_max: 2
-    is_moe: true
-    moe_weight: 2 
+    is_moe: true # true
+    moe_weight: 0.5 #2 
     moe:
-      multiple_gate: false
-      num_experts: 8 #16 #8
-      k: 2 #4 #2 
+      multiple_gate: True # false
+      num_experts: 4 #16 #8
+      k: 1 #2 #4 #可以试一下1，以及留一个num_moe_layers的接口
       num_shared_experts: 0 # not available yet
     add_corr: true
     add_depth: true
@@ -52,7 +52,7 @@ model:
 
     # lr should be thought on per sample basis
     # effective lr is multiplied by bs * num_devices
-    lr: 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
+    lr: 1e-4 # 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (world_size * cfg.train.bs),少GPU应对应增大lr
     warmup_steps: 2000
     optimizer_type: lamb
     lr_cos_dec: true
@@ -72,7 +72,7 @@ model:
 
 
 env:
-  tasks: stack_cups,turn_tap,open_drawer # stack_cups, before all
+  tasks: all # stack_cups,turn_tap,open_drawer,push_buttons,slide_block_to_color_target # stack_cups, before all
   cameras: ["front", "left_shoulder", "right_shoulder", "wrist"]
   scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized
   image_size: 128
@@ -126,13 +126,14 @@ eval:
 
 hydra:
   job:
-    name: test # default # arp_plus # eval.arp_plus
+    name: moe # test # default # arp_plus # eval.arp_plus
     # name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
     chdir: false
   run:
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}-53333/${now:%Y-%m-%d_%H-%M}
+    # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/dubug
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M}
     # dir: /opt/data/private/arp/arp/rlb/outputs/arp_plus_moe_1gate/lr1.75e-05/10wE/2024-12-24_17-15
   
 output_dir: ${hydra:run.dir} 
 # output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'
-wandb: null
+wandb: arp_moe # before null
