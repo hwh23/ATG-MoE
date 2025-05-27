@@ -1,4 +1,4 @@
-name: arp
+name: ATG-MoE
 channels:
   - conda-forge
 dependencies:

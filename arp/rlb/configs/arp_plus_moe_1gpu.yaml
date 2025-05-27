@@ -5,7 +5,7 @@ hydra:
   run:
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M} # 多卡时不要用now
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.4_100epochs_all_tasks_1gpu/${now:%Y-%m-%d_%H-%M} 
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.21_3tasks_1gpu_2MlpExperts_alpha_oldChunk/${now:%Y-%m-%d_%H-%M} 
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.27_3tasks_1gpu_4MlpExperts_alpha_oldChunk/${now:%Y-%m-%d_%H-%M} 
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.20_3tasks_1gpu_oldChunk/${now:%Y-%m-%d_%H-%M} 
 
 # ================================================ #
@@ -23,7 +23,7 @@ model:
     moe_weight: 1 # 0.5 #2 
     moe:
       multiple_gate: True # false
-      num_experts: 2 # 4 #16 #8
+      num_experts: 4 # 4 #16 #8
       k: 1 #2 #4 #可以留一个num_moe_layers的接口
       num_shared_experts: 0 # not available yet
     add_corr: true
