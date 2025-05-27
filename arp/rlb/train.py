@@ -24,6 +24,8 @@ import logging
 from tensorboard import program
 # Suppress TensorBoard logs
 logging.getLogger('tensorboard').setLevel(logging.ERROR)
+from omegaconf import OmegaConf
+import hydra
 
 def train(agent, dataloader: DataLoader, logger, device: int, freq: int = 30, rank: int = 0, save_freq: int = 6000, start_step=0, use_wandb=False,
           writer: SummaryWriter=None):
@@ -70,7 +72,8 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
     ddp, on_master = world_size > 1, rank == 0
     print(f'Rank - {rank}, master = {on_master}')
     if ddp:
-        os.environ["MASTER_ADDR"] = "localhost"
+        # os.environ["MASTER_ADDR"] = "localhost" # BUG 服务器多卡会无法通讯
+        os.environ["MASTER_ADDR"] = "0.0.0.0"
         os.environ["MASTER_PORT"] = str(port)
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
     device = rank
@@ -133,24 +136,32 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
     else:
         agent.train()
 
-    # Create a TensorBoard program instance
-    tb = program.TensorBoard()
+    # BUG 多进程很卡，Create a TensorBoard program instance
+    # tb = program.TensorBoard()
     # Launch TensorBoard
-    tb.configure(argv=[None, '--logdir', cfg.output_dir, '--port', str(find_free_port_for_tensorboard())])
-    print(f"\n==================================" + \
-          f" TensorBoard is running at {tb.launch()} " + \
-          f"==================================\n")
+    # tb.configure(argv=[None, '--logdir', cfg.output_dir, '--port', str(find_free_port_for_tensorboard())])
+    # print(f"\n==================================" + \
+    #       f" TensorBoard is running at {tb.launch()} " + \
+    #       f"==================================\n")
 
+    # train(agent, dataloader, log, device, freq=cfg.train.disp_freq, rank=rank, save_freq=cfg.train.save_freq, 
+    #     start_step=start_step, use_wandb=cfg.wandb and rank == 0,
+    #     writer=SummaryWriter(log_dir=cfg.output_dir))    
     train(agent, dataloader, log, device, freq=cfg.train.disp_freq, rank=rank, save_freq=cfg.train.save_freq, 
         start_step=start_step, use_wandb=cfg.wandb and rank == 0,
-        writer=SummaryWriter(log_dir=cfg.output_dir))
+        writer=False)
+    
 
-
-@configurable()
+# @hydra.main(config_path="./configs", config_name="arp_plus.yaml",version_base="1.1")
+@configurable() # 多卡无法解析output dir
 def main(cfg: DictConfig):
     if cfg.train.num_gpus <= 1:
         main_single(0, cfg, -1, cfg.output_dir)
     else:
+         # 预解析 output_dir（此时 hydra 插值是有效的）
+        # 解析所有Hydra插值
+        # OmegaConf.resolve(cfg)
+        # output_dir = str(cfg.output_dir)
         port = find_free_port()
         mp.spawn(main_single, args=(cfg, port, cfg.output_dir),  nprocs=cfg.train.num_gpus, join=True)
 

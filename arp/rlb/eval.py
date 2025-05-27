@@ -98,6 +98,9 @@ def main(cfg: DictConfig):
         task_rewards = []
         for ep in range(cfg.eval.episode_num):
             episode_rollout = []
+
+            # 提前传入task_name
+            task_name = tasks[task_id]
             generator = rollout.generator(
                 step_signal=step_signal,
                 env=eval_env,
@@ -120,8 +123,7 @@ def main(cfg: DictConfig):
                 stats_accumulator.step(transition, True)
                 current_task_id = transition.info["active_task_id"]
                 assert current_task_id == task_id
-
-            task_name = tasks[task_id]
+            
             reward = episode_rollout[-1].reward
             task_rewards.append(reward)
             lang_goal = eval_env._lang_goal

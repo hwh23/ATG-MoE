@@ -410,7 +410,7 @@ class PolicyNetwork(nn.Module):
                                 'visual-featmap': visual_featmap_1[:, view_id],
                                 'smooth-heatmap': smooth_spatial_label_stage1[:, :, view_id]
                             },
-                            task_ids=observation['task_idx'])
+                            task_ids = observation['task_idx'])
                 for k, v in _loss_dict.items():
                     tmp_loss_dict[k].append(v)
             
@@ -428,7 +428,7 @@ class PolicyNetwork(nn.Module):
                                             'visual-tokens': visual_featmap_1[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_1[:, view_id],
                                     },
-                                    task_ids=0#observation['task_idx']
+                                    task_ids = observation['task_idx']
                                     )
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
@@ -537,7 +537,6 @@ class PolicyNetwork(nn.Module):
             loss_dicts.append(loss_dict_gripper)
         else:
             # Generate future waypoint from prompt
-            task_ids = None #TODO find a better way of doing this
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage2-screen-pts'])]
             for view_id in range(3):
@@ -546,7 +545,7 @@ class PolicyNetwork(nn.Module):
                                             'visual-tokens': visual_featmap_2[:, view_id].flatten(-2, -1).permute(0, 2, 1),
                                             'visual-featmap': visual_featmap_2[:, view_id],
                                     },
-                                    task_ids=task_ids)
+                                    task_ids=observation['task_idx'])
                 assert len(self.spatial_logits_buffer) == (view_id + 1)
 
             hms = torch.cat([F.softmax(hm_logits.reshape(bs, -1), dim=1).reshape(bs, 1, 224, 224) 
@@ -572,7 +571,7 @@ class PolicyNetwork(nn.Module):
                                                     contexts={
                                                         'prompt-features': prompt_features
                                                     },
-                                                    task_ids=task_ids)
+                                                    task_ids=observation['task_idx'])
         #endregion
         
         #region final output

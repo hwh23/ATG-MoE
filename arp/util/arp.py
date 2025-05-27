@@ -180,7 +180,8 @@ class ChunkTransformerLayer(nn.Module):
                            head_size=mlp_hidden_dim,
                            task_num=len(TASK_TO_ID),
                            moe_multiple_gate=moe_multiple_gate,
-                           moe_cfg=moe_cfg
+                           moe_cfg=moe_cfg,
+                           drop=mlp_dropout
                         )
         else:
             self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
@@ -257,20 +258,20 @@ class ChunkTransformerLayer(nn.Module):
                     propagate_result, aux_loss = self.propagate(modulate(self.ln_mlp(x), shift_mlp, scale_mlp), task_ids)
                     aux_losses[i]=aux_loss
                 else:
-                    propagate_result = self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
-                x_tmp[i] = propagate_result
+                    propagate_result =self.mlp(modulate(self.ln_mlp(x), shift_mlp, scale_mlp))
+                x_tmp[i] = x + gate_mlp * propagate_result
             xs = x_tmp
         else:
             xs = [x + cond_attn for x, cond_attn in zip(xs, cond_attns)]
             ys = self.attn.forward_interleave([self.ln_attn(x) for x in xs], masks, dependency_attn_mask=dependency_attn_mask)
             xs = [x + y for x, y in zip(xs, ys)]
-            for i, x in enumerate(xs):
+            for i, x in enumerate(xs): # 这里把 attention 的输出加回 x
                 if self.is_moe:
                     propagate_result, aux_loss = self.propagate(self.ln_mlp(x), task_ids)
                     aux_losses[i]=aux_loss
                 else:
                     propagate_result = self.mlp(self.ln_mlp(x))
-                x_tmp[i] = propagate_result
+                x_tmp[i] = x + propagate_result
             xs = x_tmp
         return xs, aux_losses
     
@@ -732,6 +733,10 @@ class ChunkEmbedding(nn.Module):
         self.chunk_embed = nn.Embedding(max_chunk_size, n_embd)
         self.token_type_embed = nn.Embedding(len(tokens), n_embd)
 
+        # # 添加强制初始化代码
+        # nn.init.xavier_normal_(self.chunk_embed.weight)
+        # nn.init.xavier_normal_(self.token_type_embed.weight)
+
     def forward(self, chk_ids, tk_ids):
         """
         > note the chunk embedding is shared across all tokens, more like a relative position embedding within each
@@ -746,11 +751,19 @@ class ChunkEmbedding(nn.Module):
         chk_ids = chk_ids.long()
         tk_id_emb = self.token_type_embed(tk_ids.long())
         reg_indices = chk_ids.clone()
+
         for i in range(chk_ids.size(0)):
             reg_indices[i] = self.chk_ids_to_indices(chk_ids[i])
+
         if reg_indices.size(0) == 1:
             reg_indices = reg_indices.repeat(tk_ids.size(0), 1) 
+
         reg_emb = self.chunk_embed(reg_indices)
+
+        # 防止 silent NaN传递
+        assert not torch.isnan(reg_emb).any(), "reg_emb has NaNs!"
+        assert not torch.isnan(tk_id_emb).any(), "tk_id_emb has NaNs!"
+
         return reg_emb + tk_id_emb
         
     @staticmethod
@@ -763,12 +776,40 @@ class ChunkEmbedding(nn.Module):
         input: [1,1,1, 2,2, 3,3,3, 4, 5,5,5,5,5], output: [0,1,2, 0,1, 0,1,2, 0, 0,1,2,3,4]
         (transform chunk ids to relative indices within each set)
         """
+        # BUG　会产生NAN
         dev, min_id = ids.device, ids.min()
         counts = torch.unique(ids, return_counts=True, sorted=True)[1]
         starts = torch.cat([torch.zeros(1, dtype=torch.long, device=dev), counts[:-1].cumsum(0)])
         index = torch.bucketize(ids, torch.arange(min_id, min_id + len(counts), device=dev))
         return torch.arange(0, len(ids), device=dev) - starts[index]
 
+    # def chk_ids_to_indices(ids: torch.LongTensor) -> torch.LongTensor:
+    #     """
+    #     ids: LongTensor of shape (L,)
+    #     returns: LongTensor of shape (L,),
+    #             where for each unique value v in ids, the occurrences of v
+    #             are numbered 0,1,2,... in order of appearance.
+    #     """
+    #     device = ids.device
+    #     unique_vals = torch.unique(ids)
+    #     # 为每个值分配一个从 0 开始的段号
+    #     # e.g. unique_vals = [2,5,7] => bucket_map = {2:0, 5:1, 7:2}
+    #     # torch.searchsorted 也能用，但 Python dict 最直观
+    #     bucket_map = {int(v): i for i, v in enumerate(unique_vals.tolist())}
+
+    #     # 先把 ids 映射到段号：[2,2,5,7] -> [0,0,1,2]
+    #     buckets = ids.clone()
+    #     for v, b in bucket_map.items():
+    #         buckets[ids == v] = b
+
+    #     # 然后对每个段按出现顺序计数
+    #     counters = torch.zeros(len(unique_vals), dtype=torch.long, device=device)
+    #     out = torch.empty_like(ids, dtype=torch.long)
+    #     for i in range(ids.size(0)):
+    #         b = int(buckets[i].item())
+    #         out[i] = counters[b]
+    #         counters[b] += 1
+    #     return out
 
 #endregion Embedding ###############
 
@@ -1178,6 +1219,7 @@ class AutoRegressivePolicy(nn.Module):
             for idx, layer_id in enumerate(layer_ids):
                 block: ChunkTransformerLayer = self.blocks[layer_id]
                 cond = contexts[block.conditional] if block.conditional else None
+
                 embs, aux_loss[idx] = block.forward_train(embs, cond, train_masks, dependency_attn_mask=dependency_attn_mask, task_ids=task_ids)
                 if self.cfg.layer_norm_every_block:
                     embs = [self.layer_norms[layer_id](e) for e in embs] 
@@ -1230,6 +1272,7 @@ class AutoRegressivePolicy(nn.Module):
         embs_star = self.token_codes_to_embeddings(tk_codes, tk_ids, **contexts) 
         # The tokens to be predicted are embedded by chunk embedder 
         embs_hat = self.chunk_embedder(chk_ids, tk_ids)
+        assert not torch.isnan(embs_hat).any(), "Found NaN in embs_hat! Check input_ids and embedding weights."
 
         if match_layer:
             layer_ids = [i for i, ln in enumerate(self.cfg.layers) if match_layer in ln['name']]

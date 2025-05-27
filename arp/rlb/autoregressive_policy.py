@@ -529,11 +529,13 @@ class PolicyNetwork(nn.Module):
                     if _action_rot[-1] < 0:
                         _action_rot = -_action_rot
                     action_rot[i] = _action_rot
-
+        
+        # 裁剪无效点
         pc, img_feat = clamp_pc_in_bound(pc, img_feat, self.scene_bounds, skip=not self.move_pc_in_bound)
         pc_new, rev_trans_stage1, waypoint_stage1 = [], [], []
 
         for i, _pc in enumerate(pc):
+            # 归一化至标准立方体，简化模型学习
             a, b = place_pc_in_cube(_pc,
                 with_mean_or_bounds=self._place_with_mean,
                 scene_bounds=None if self._place_with_mean else self.scene_bounds,
@@ -766,13 +768,46 @@ class Policy:
             if self._optimizer_type == "lamb":
                 if self.bnb:
                     import bitsandbytes as bnb
-                    print("Using 8-Bit Optimizer")
+                    print("Using 8-Bit Optimizer, FP32 for task_alphas")
+                     # 1. 收集所有参数，并根据名字把 task_alphas 分离出来
+                    named_params = list(self._network.named_parameters())
+                    alpha_params = []
+                    other_params = []
+                    for name, p in named_params:
+                        if "task_alphas" in name:
+                            alpha_params.append(p)
+                        else:
+                            other_params.append(p)
+
+                    # -------------------------------------------------------------------
+                    # 2. 构造参数组
+                    # param_groups = [
+                    #     # 其余参数走 8-bit LAMB
+                    #     {
+                    #         "params": other_params,                            
+                    #         "weight_decay": self._lambda_weight_l2,
+                    #         "optim_bits": 8,
+                    #     },
+                    #     # task_alphas 单独走 FP32，weight_decay=0
+                    #     {
+                    #         "params": alpha_params,
+                    #         "weight_decay": 0.0,
+                    #         "optim_bits": 32
+                    #     }
+                    # ]
+
                     self._optimizer = bnb.optim.LAMB(
-                        self._network.parameters(),
+                        other_params, #param_groups,
                         lr=self._lr,
                         weight_decay=self._lambda_weight_l2,
                         betas=(0.9, 0.999),
                     )
+                    if alpha_params != []:
+                        self._alpha_optimizer = torch.optim.Adam(
+                            alpha_params,  # 这些走 FP32
+                            lr=self._lr,
+                            weight_decay=0
+                        )
                 else:
                     # From: https://github.com/cybertronai/pytorch-lamb/blob/master/pytorch_lamb/lamb.py
                     self._optimizer = Lamb(
@@ -870,16 +905,47 @@ class Policy:
         assert replay_sample["lang_goal_embs"].shape[1:] == (77, 512)
         assert replay_sample["low_dim_state"].shape[1:] == (self.proprio_dim,)
         assert self._network.training
-        self._network.update()
+        # BUG 多卡ddp update, 显然在这改也不好，所有self._network相关参数都要改
+        if isinstance(self._network, torch.nn.parallel.DistributedDataParallel):
+            self._network.module.update()
+        else:
+            self._network.update()
+        # self._network.update()
+
         with autocast(enabled=self.amp):
             loss_dict = self._network(replay_sample)
-            loss_dict['rot-z.ce_loss'] *= self._network.exponential_weight
-            stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
-            stat_dict['exponential_weight.rot-z.ce_loss'] = self._network.exponential_weight
+            # BUG 同
+            if isinstance(self._network, torch.nn.parallel.DistributedDataParallel):
+                loss_dict['rot-z.ce_loss'] *= self._network.module.exponential_weight
+                stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
+                stat_dict['exponential_weight.rot-z.ce_loss'] = self._network.module.exponential_weight
+
+            else:
+                loss_dict['rot-z.ce_loss'] *= self._network.exponential_weight
+                stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
+                stat_dict['exponential_weight.rot-z.ce_loss'] = self._network.exponential_weight            
+            # loss_dict['rot-z.ce_loss'] *= self._network.exponential_weight
+            # stat_dict = loss_dict.pop('stat_dict',  {})# Stat_dict:v1_norm, v2_norm 不纳入backward()
+            # stat_dict['exponential_weight.rot-z.ce_loss'] = self._network.exponential_weight
             total_loss = sum(loss_dict.values())
+
+            # 双优化器
             self._optimizer.zero_grad(set_to_none=True)
+            if hasattr(self, '_alpha_optimizer'):
+                self._alpha_optimizer.zero_grad(set_to_none=True)
+            # # TODO 在这里做backward，在这里加检测函数不大好，去train里找找
+            # if torch.isnan(total_loss):
+            #     print("发现loss为NaN，停止训练")
+            #     # 保存当前模型，方便后续排查
+            #     Policy.save(self, step=)
+            #     raise ValueError("Loss is NaN!")
+
             self.scaler.scale(total_loss).backward()
             self.scaler.step(self._optimizer)
+            # 不过amp
+            if hasattr(self, '_alpha_optimizer'):
+                self._alpha_optimizer.step()
+
             self.scaler.update()
             self._lr_sched.step()
             loss_log = {

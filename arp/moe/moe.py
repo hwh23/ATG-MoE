@@ -287,20 +287,25 @@ def compute_gating(k: int, scores: torch.Tensor, top_k_gates: torch.Tensor, top_
     
     # Flatten tensors 
     top_k_gates = top_k_gates.flatten()
+    # BUG nonzero()可能会丢token
+    if k == 1:
+        flat_idx = top_k_indices.view(-1)                # [batch*seq_len]
+        expert_size = torch.bincount(flat_idx, minlength=scores.size(-1))
+    else:
+        # count how many tokens per expert
+        expert_size = (gates > 0).long().sum(0)
+
     top_k_experts = top_k_indices.flatten()
     nonzeros = top_k_gates.nonzero().squeeze(-1)
-    
+
     # Get the Non-Zero top_k_expert from top_k_indices (where top_k_indices means the top_k_expert)
     # knowing that, top_k_gates and top_k_indices have the same indexing, 
     # therefore an non-zero index for top_k_gates and top_k_indices are the same
     top_k_experts_nonzero = top_k_experts[nonzeros]
     
     # Sort experts according to the expert ID, get the hash index of sorting
-    _, _index_sorted_experts = top_k_experts_nonzero.sort(0)
-    
-    # Count active experts
-    expert_size = (gates > 0).long().sum(0)
-    
+    _, _index_sorted_experts = top_k_experts_nonzero.sort(0)      
+
     # Get the sorted the nonzero top_k_experts indices
     # index_sorted_experts: contains the sorted indices of non-zero gating values, corresponding to active experts.
     index_sorted_experts = nonzeros[_index_sorted_experts]
@@ -367,7 +372,8 @@ class MoE(nn.Module):
                  moe_multiple_gate:bool=False,
                  bias=True, 
                  activation=nn.Sequential(nn.GELU()),
-                 moe_cfg=None
+                 moe_cfg=None,
+                 drop=0.1
                  ):
         super().__init__()
         # overwrite arguments with config if provided
@@ -385,9 +391,11 @@ class MoE(nn.Module):
         self.input_size = input_size
         self.head_size = head_size
         self.bias = bias
+        self.expert_drop = drop
         # TODO Experts重新设计
-        self.experts = ParallelExperts(num_experts, input_size, head_size, bias)
-        self.output_experts = ParallelExperts(num_experts, head_size, input_size, bias)
+        # self.experts = ParallelExperts(num_experts, input_size, head_size, bias)
+        # self.output_experts = ParallelExperts(num_experts, head_size, input_size, bias)
+
         self.k = min(k, self.num_experts)
         self.limit_k = max(k, limit_k)
         self.activation = activation
@@ -410,6 +418,10 @@ class SDPMOE(MoE):
         self.w_MI = w_MI
         self.w_H = w_H
         self.w_finetune_MI = w_finetune_MI if w_finetune_MI >= -100 else 0
+
+        # 这里仍保留sdp的expert设计
+        self.experts = ParallelExperts(self.num_experts, input_size, self.head_size, self.bias)
+        self.output_experts = ParallelExperts(self.num_experts, self.head_size, input_size, self.bias)
         
         hidden_size = max(self.input_size//4, 1) # in case input size < 4
         if w_finetune_MI < -100 and self.moe_multiple_gate: # multi gate, w_finetune_MI < -100
@@ -526,7 +538,6 @@ class SDPMOE(MoE):
         # use output from gate directly otherwise
         else:
             logits = clean_logits
-
         
         scores = torch.softmax(logits, dim=1) + 1e-4
 
@@ -584,18 +595,20 @@ class DeepSeekMoE(MoE):
         self.window_length = 20
         self.window = Window(self.window_length)
         
-        hidden_size = max(self.input_size//4, 1)
+        # hidden_size = max(self.input_size//4, 1)
+        hidden_size = self.head_size
 
         approx_gelu = lambda: nn.GELU(approximate="tanh")
 
-        # self.experts= nn.ModuleList([Mlp(in_features=self.input_size,
-        #                                   hidden_features=int(hidden_size * 4.0), 
-        #                                   act_layer=approx_gelu, 
-        #                                   drop=0.1)
-        #                                   for _ in range(self.num_experts)])
+        # 改进，使用MLP替换原先sdp的专家设计
+        self.experts= nn.ModuleList([Mlp(in_features=self.input_size,
+                                          hidden_features=hidden_size, 
+                                          act_layer=approx_gelu, 
+                                          drop=self.expert_drop)
+                                          for _ in range(self.num_experts)])
         
-        self.shared_experts = Mlp(in_features=self.input_size, hidden_features=int(hidden_size * 4.0), act_layer=approx_gelu,
-                                drop=0.1)
+        self.shared_experts = Mlp(in_features=self.input_size, hidden_features=hidden_size, act_layer=approx_gelu,
+                                drop=self.expert_drop)
 
         linearlayer1 = nn.Linear(self.input_size, hidden_size)
         linearlayer2 = nn.Linear(hidden_size, self.num_experts, bias=True)
@@ -611,96 +624,131 @@ class DeepSeekMoE(MoE):
         else:
             nn.init.zeros_(self.f_gate[0][-1].weight)
 
+        # 改进：加入通用专家与普通专家间 可学习的混合系数
+        # 用一个可学习向量，每个元素对应一个 task
+        self.task_alphas = nn.Parameter(torch.zeros(self.task_num))
+
     def extra_repr(self):
         return f'k={self.k}, task_num={self.task_num}, num_expert={self.num_experts}, num_gate={len(self.f_gate)}'        
+ 
+    def top_k_gating(self, x: Tensor, task_ids: Tensor):
+        # 改进版，按任务处理batch，提高效率；aux_loss是每个task一个，最后取均值（之前是global）
+        """
+        Args:
+            x: (bsz, length, emb_dim)
+            task_ids: (bsz, ) or (bsz, length)
+        
+        Returns:
+            topk_idx: (bsz, length, top_k)
+            topk_weight: (bsz, length, top_k)
+            loss: auxiliary load balance loss
+        """
+        bsz, length, emb_dim = x.shape
+        x_flat = x.view(-1, emb_dim)  # (bsz * length, emb_dim)
 
-    def top_k_gating(self, x:Tensor, task_bh:Tensor)->Tensor:
-        bsz, seq_len, h = x.shape  
-        # Generate a mask corresponding to the task id
-        if self.moe_multiple_gate:
-            categories, task_masks = self.get_task_mask(x, task_bh)
-            # logits = torch.zeros(size=[bsz, seq_len, self.num_experts],device=x.device)
-            # for i, task_mask in enumerate(task_masks):
-            #     logits += self.f_gate[categories[i]](x * task_mask.view(bsz, 1,1))
-            masked_x = x.unsqueeze(0) * task_masks.unsqueeze(-1).unsqueeze(-1)  # masked_x.Shape: [num_categories, bsz, seq_len, num_tasks]
-            # 将unique_categories从tensor转换为整数列表
-            categories_list = [c.item() for c in categories]
-            # 使用列表推导式生成所有门控函数的输出
-            all_logits = []
-            for i, category in enumerate(categories_list):
-                # 获取对应的门控函数
-                gate = self.f_gate[category]
-                # 计算该类别的logits
-                logits = gate(masked_x[i])
-                all_logits.append(logits)
-            # 将所有logits相加
-            logits = torch.stack(all_logits, dim=0).sum(0)
+        if isinstance(task_ids, int):
+            task_ids = torch.full((bsz,), task_ids, dtype=torch.long, device=x.device)
+        
+        if task_ids.dim() == 2:
+            task_ids = task_ids[:, 0]  # Assume (bsz, length) → (bsz,) by taking first token
+
+        task_ids = task_ids.flatten()  # (bsz, )
+
+        unique_tasks = task_ids.unique()
+
+        topk_idx = torch.empty((bsz * length, self.k), dtype=torch.long, device=x.device)
+        topk_weight = torch.empty((bsz * length, self.k), dtype=x.dtype, device=x.device)
+        all_aux_loss = []
+        all_gate_probs = x.new_zeros(bsz * length, self.num_experts)
+
+        if unique_tasks.numel() == 1:
+            # 单任务特化
+            task = unique_tasks.item()
+            gate_fn = self.f_gate[task] if self.moe_multiple_gate else self.f_gate[0]
+
+            gate_logits = gate_fn(x_flat)  # (bsz * length, num_experts)
+            gate_probs = F.softmax(gate_logits, dim=-1)
+
+            topk_weight_val, topk_idx_val = torch.topk(gate_probs, self.k, dim=-1)
+            topk_idx.copy_(topk_idx_val)
+            topk_weight.copy_(topk_weight_val)
+
+            # 计算aux loss
+            mean_gating_probs = gate_probs.mean(dim=0)
+            aux_loss = (mean_gating_probs * mean_gating_probs).sum() * gate_probs.shape[1]
+            all_aux_loss.append(aux_loss)
+
+            all_gate_probs.copy_(gate_probs)  # 记录，用于后续compute_gating
+
         else:
-            logits = self.f_gate[0](x)
-        
-        # compute gating scores
-        scores = logits.softmax(dim=-1)
-        
-        # select top-k experts
-        topk_weight, topk_idx = torch.topk(scores, k=self.k, dim=-1, sorted=False)
-        
-        # expert-level computation auxiliary loss
-        if self.training: #and self.alpha > 0.0:
-            # always compute aux loss based on the naive greedy topk method
-            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
-            
-            # count how many tokens selected per gate in all batch sizes
-            mask_ce = F.one_hot(topk_idx_for_aux_loss.view(-1), num_classes=self.num_experts)
-            # the mean of expert selection among all data 
-            ce = mask_ce.float().mean(0) # no need to divide by k since maskce is viewed and meaned
-            # scale up 
-            fi = ce * self.num_experts 
-            
-            # calculate current Pi: the mean of scores of each expert among all data
-            Pi = scores.view(-1, self.num_experts).mean(0)
-            
-            # initialize history if this is the first time applied
-            self.window.init_history(Pi.size(), Pi.device)
-            
-            # step the window
-            moving_average_pi = self.window.step(Pi.detach())
-            
-            # Get the buffered auxiliary loss, 
-            # noticed that the original loss was in range [1, num_expert], 
-            # map the loss to range [0,1], -0.6 leaves some space in case loss becomes negative
-            # the weight will be applied outside the MoE layer
-            aux_loss = ((moving_average_pi * fi).sum() - 0.6)/(self.num_experts - 1)
-            
-        else: # do not calculate aux when inferencing
-            aux_loss = None
-            
+            # 多任务
+            for task in unique_tasks.tolist():
+                task_mask = (task_ids == task)  # (bsz, )
+                task_mask_expand = task_mask.repeat_interleave(length)  # (bsz * length)
+
+                if task_mask_expand.sum() == 0:
+                    continue  # 安全保护
+
+                gate_fn = self.f_gate[task] if self.moe_multiple_gate else self.f_gate[0]
+
+                x_task = x_flat[task_mask_expand]
+                gate_logits = gate_fn(x_task)
+                gate_probs = F.softmax(gate_logits, dim=-1)
+
+                topk_weight_val, topk_idx_val = torch.topk(gate_probs, self.k, dim=-1)
+                topk_idx[task_mask_expand] = topk_idx_val
+                topk_weight[task_mask_expand] = topk_weight_val
+
+                mean_gating_probs = gate_probs.mean(dim=0)
+                aux_loss = (mean_gating_probs * mean_gating_probs).sum() * gate_probs.shape[1]
+                all_aux_loss.append(aux_loss)
+
+                all_gate_probs[task_mask_expand] = gate_probs  # 收集所有gate_probs
+
+        loss = torch.stack(all_aux_loss).mean()
+
+        # compute_gating处理
         self.batch_gates, self.batch_index, self.expert_size, gates, self.index_sorted_experts = \
-            compute_gating(self.k, scores.reshape(-1, scores.shape[-1]), topk_weight.reshape(-1, topk_weight.shape[-1]), topk_idx.reshape(-1, topk_idx.shape[-1]))
-        
-        return topk_idx, topk_weight, aux_loss
-    
+            compute_gating(
+                self.k,
+                all_gate_probs,  # (bsz*length, num_experts)
+                topk_weight.view(-1, self.k),
+                topk_idx.view(-1, self.k)
+            )
+
+        # reshape topk_idx和topk_weight回去
+        topk_idx = topk_idx.view(bsz, length, self.k)
+        topk_weight = topk_weight.view(bsz, length, self.k)
+
+        return topk_idx, topk_weight, loss    
       
-    def get_task_mask(self, x:Tensor, task_ids:Tensor):
-        # Find unique categories
-        unique_categories:Tensor = torch.unique(task_ids) # shape: [number_categories] 
-
-        # Generate masks for each category
-        masks = task_ids.unsqueeze(0) == unique_categories.unsqueeze(1) # shape: [number_categories, batch_size]
-
-        return unique_categories, masks
-    
-    def forward(self, x:Tensor, task_bh:Tensor):    
+    def forward(self, x: Tensor, task_ids: Tensor):
+        # 使用简单MLP expert的版本
+        # 同时，针对每一个任务使用动态参数，决定experts和shared_experts的混合比例
         bsz, length, emb_size = x.size()
-        orig_shape = x.shape
         identity = x
-        
-        topk_idx, topk_weight, loss = self.top_k_gating(x, task_bh)
-        x = x.view(-1, emb_size)
-        h = self.experts(x[self.batch_index], self.expert_size)
-        activated_h = self.activation(h)
-        expert_outputs = self.output_experts(activated_h, self.expert_size)
-        
-        # index expert output y based on batch index, and shape it to the original batch
+        topk_idx, topk_weight, loss = self.top_k_gating(x, task_ids)
+
+        # Flatten inputs
+        x_flat = x.view(-1, emb_size)
+        # gather and sort inputs by expert
+        sorted_inputs = x_flat[self.batch_index]
+
+        # split inputs per expert
+        inputs_split = torch.split(sorted_inputs, self.expert_size.tolist(), dim=0)
+
+        # Compute expert outputs
+        outputs = []
+        for i, inp in enumerate(inputs_split):
+            if inp.numel() == 0:
+                outputs.append(torch.zeros(0, emb_size, device=x.device))
+            else:
+                out = self.experts[i](inp)
+                outputs.append(out)
+        # Concatenate and reorder
+        expert_outputs = torch.cat(outputs, dim=0)
+
+        # Scatter-add back to batch
         zeros = torch.zeros(
             (bsz * length, self.input_size), 
             dtype=expert_outputs.dtype, 
@@ -708,16 +756,29 @@ class DeepSeekMoE(MoE):
         y = zeros.index_add(0, self.batch_index, expert_outputs)
         y = y.view(bsz, length, self.input_size)
 
-        # TODO weight
-        y = 0.4 * y + 0.6 * self.shared_experts(identity)
-        
-        if self.training:
-            return y, loss
-        else:
-            return y
-         
+        # Residual shared expert,展平是为了更好适配两层MLP的输入格式
+        shared_flat = identity.view(-1, emb_size)
+        shared_out_flat = self.shared_experts(shared_flat)
+        shared_out = shared_out_flat.view(bsz, length, emb_size)
 
-   
+        # Ensure task_ids is tensor (when evaluating, is a int)
+        if isinstance(task_ids, int):
+            task_id_vec = torch.full((bsz,), task_ids, dtype=torch.long, device=x.device)
+        else:
+            if task_ids.dim() == 2:
+                task_id_vec = task_ids[:,0]
+            else:
+                task_id_vec = task_ids
+        # task_id_vec: (bsz,)
+        # Expand to token level (bsz*length,)
+        raw_alpha = self.task_alphas[task_id_vec]
+        raw_alpha_tokens = raw_alpha.unsqueeze(1).expand(-1, length).flatten()
+        alpha = torch.sigmoid(raw_alpha_tokens).view(bsz, length, 1)
+        y = alpha * y + (1 - alpha) * shared_out
+
+        return y, loss if self.training else y
+
+  
 class DeepSeekMoEBlock(nn.Module):
     def __init__(self,
                  num_moe_layers:int=2,

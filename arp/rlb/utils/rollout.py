@@ -2,7 +2,7 @@ from multiprocessing import Value
 import numpy as np
 import torch
 from utils.structure import Agent, Env, FullTransition, ActResult
-
+from utils_with_rlbench import TASK_TO_ID
 
 class RolloutGenerator(object):
 
@@ -25,12 +25,16 @@ class RolloutGenerator(object):
             obs = env.reset_to_demo(eval_seed)
         else:
             obs = env.reset()
-        agent.reset(task={v:k for k,v in env._task_name_to_idx.items()}[env._active_task_id], desc=env._lang_goal)
+        task={v:k for k,v in env._task_name_to_idx.items()}[env._active_task_id]
+        agent.reset(task=task, desc=env._lang_goal)
+
         obs_history = {k: np.array(v, dtype=self._get_type(v)) if not isinstance(v, dict) else v for k, v in obs.items()}
         for step in range(episode_length):
             # add batch dimension
             prepped_data = {k: torch.tensor(v, device=self._env_device)[None, ...] if not isinstance(v, dict) else v 
                             for k, v in obs_history.items()}
+            int_task_id = TASK_TO_ID[task]
+            prepped_data["task_idx"] = int_task_id
             # import pudb;
             # pudb.set_trace()
             act_result = agent.act(step_signal.value, prepped_data)
