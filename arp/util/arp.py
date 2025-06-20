@@ -82,7 +82,6 @@ class Attention(nn.Module):
             qkvs.append([q,k,v])
         
         (q_star, k_star, v_star), (q_hat, k_hat, v_hat) = qkvs
-        # TODO: VAR mask 可以在这里改
         (mask_star, mask_hat), mask_causal = [~m for m in attn_masks], torch.tril(torch.ones(T, T, device=dev))[None, None, ...] == 0
 
         def mlp(y):
@@ -151,14 +150,226 @@ class Attention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
+# 新版本Attention，新增相对位置编码偏置
+class RelChunkAttention(nn.Module):
+    def __init__(
+        self,
+        n_embd: int,
+        n_head: int,
+        max_len: int,             # <--- 序列最大长度上限
+        attn_pdrop: float = 0.1,
+        resid_pdrop: float = 0.1,
+        cross: bool = False,
+        clamp_attn: bool = False
+    ):
+        """
+        Args:
+            n_embd:       隐藏维度 D
+            n_head:       注意力头数 H
+            max_len:      自回归阶段允许的最大序列长度，用于构造相对位置偏置表
+            attn_pdrop:   attention 段的 dropout 比例
+            resid_pdrop:  残差段的 dropout 比例
+            cross:        是否为跨注意力（query 来自 x，key/value 来自 c）
+            clamp_attn:   如果使用 fp16，是否 clamp attention 分数
+        """
+        super().__init__()
+        self.clamp_attn = clamp_attn
+        self.cross = cross
+        assert n_embd % n_head == 0, "n_embd 必须能被 n_head 整除"
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.max_len = max_len
+
+        # --- 原有 QKV 或 c_attn 定义 ---
+        if cross:
+            self.kv_attn = nn.Linear(n_embd, 2 * n_embd)
+            self.q_attn = nn.Linear(n_embd, n_embd)
+        else:
+            self.c_attn = nn.Linear(n_embd, 3 * n_embd)
+        self.c_proj = nn.Linear(n_embd, n_embd)
+        self.attn_dropout = nn.Dropout(attn_pdrop)
+        self.resid_dropout = nn.Dropout(resid_pdrop)
+
+        # --- 新增：相对位置偏置表 ---
+        # rel_pos_bias 大小为 (2*max_len - 1, n_head)，用于存储可学习的偏置
+        self.rel_pos_bias = nn.Parameter(
+            torch.zeros((2 * max_len - 1, n_head)), requires_grad=True
+        )
+        nn.init.normal_(self.rel_pos_bias, mean=0.0, std=0.02)
+
+    def attend(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+        """
+        q: (B, H, T, head_dim)
+        k: (B, H, T, head_dim)
+        返回: attn_scores: (B, H, T, T)
+        """
+        attn = q @ (k.transpose(-2, -1) / math.sqrt(k.size(-1)))
+        dtype = attn.dtype
+        if self.clamp_attn and dtype == torch.float16:
+            # 对 fp16 的情况做 clamp
+            return torch.clamp(attn, min=torch.finfo(dtype).min, max=torch.finfo(dtype).max)
+        else:
+            return attn
+
+    def _get_rel_pos_bias(self, T: int, device) -> torch.Tensor:
+        """
+        根据当前序列长度 T，从 self.rel_pos_bias 中切片并返回
+        偏置张量 shape 为 (1, H, T, T)，以便直接加到 attn_scores 上。
+        """
+        # 构造相对位置索引矩阵 rel_idx，shape=(T, T)，值域 [0 .. 2*max_len-2]
+        # i, j 分别代表 query 与 key 下标
+        pos = torch.arange(T, device=device)
+        rel_idx = pos.view(-1, 1) - pos.view(1, -1)           # 结果值域 [-(T-1) .. (T-1)]
+        rel_idx = rel_idx + (self.max_len - 1)                # 平移到 [0 .. 2*max_len-2]
+        # 从可学习偏置表中取值，得到 (T, T, H)
+        bias = self.rel_pos_bias[rel_idx]                     # (T, T, H)
+        # 重排成 (H, T, T) 并扩维到 (1, H, T, T)
+        bias = bias.permute(2, 0, 1).unsqueeze(0)             # (1, H, T, T)
+        return bias
+
+    def forward_interleave(self, xs, attn_masks, dependency_attn_mask=None):
+        """
+        xs: list of 两条输入流，每个形状 (B, T, C)
+        attn_masks: [(B|1, T, T), (B|1, T, T)]，外部已准备好 keep-mask；这里取反为阻挡位置
+        dependency_attn_mask: 可选的依赖掩码 (B|1, T, T)
+        返回: y_star, y_hat，各形状均 (B, T, C)
+        """
+        assert not self.cross, "forward_interleave 仅适用于 self.cross=False"
+        B, T, C = xs[0].size()
+        dev = xs[0].device
+        head_dim = C // self.n_head
+
+        # --- 先构造相对位置偏置 bias (1, H, T, T) ---
+        bias = self._get_rel_pos_bias(T, dev)  # (1, H, T, T)
+
+        # --- 1) 为 star/hat 两路流分别计算 Q,K,V ---
+        qkvs = []
+        for x in xs:
+            # x: (B, T, C)
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)  # 每个都是 (B, T, C)
+            # 拆多头
+            q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)  # (B, H, T, head_dim)
+            k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
+            v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+            qkvs.append((q, k, v))
+
+        (q_star, k_star, v_star), (q_hat, k_hat, v_hat) = qkvs
+        # attn_masks 中存的是“keep_mask”，我们在内部要把它取反，变为 “block_mask”
+        mask_star, mask_hat = [~m for m in attn_masks]
+        # 因果屏蔽：上三角部分全部堵住
+        mask_causal = torch.tril(torch.ones(T, T, device=dev)).view(1, 1, T, T) == 0
+
+        def mlp(y: torch.Tensor) -> torch.Tensor:
+            # 把 (B, H, T, head_dim) 拼回 (B, T, C)，然后经过投影+dropout
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+            return self.resid_dropout(self.c_proj(y))
+
+        def apply_mask(att: torch.Tensor, mask: torch.Tensor, val=float("-inf")) -> torch.Tensor:
+            # mask shape 可为 (B, T, T) 或 (1, T, T)，这里要扩成 (B, H, T, T)
+            if mask.dim() == 3:
+                mask = mask.unsqueeze(1)  # (B, 1, T, T)
+            return att.masked_fill(mask, val)
+
+        def merge_attn_logits(a_star: torch.Tensor, a_hat: torch.Tensor) -> torch.Tensor:
+            # 在 a_hat 不是 -inf 的位置，用 a_hat 覆盖 a_star
+            valid = ~torch.isinf(a_hat)
+            a_star_clone = a_star.clone()
+            a_star_clone[valid] = a_hat[valid]
+            return a_star_clone
+
+        softmax = nn.Softmax(dim=-1)
+
+        # === 2) 计算 star 分支的注意力 ===
+        att_star = self.attend(q_star, k_star)           # (B, H, T, T)
+        att_star = att_star + bias                       # 加相对位置偏置 (广播到 B)
+        if dependency_attn_mask is not None:
+            att_star = apply_mask(att_star, ~dependency_attn_mask)  # 先应用依赖掩码
+        att_star = apply_mask(att_star, mask_causal)     # 因果 mask
+        y_star = mlp(self.attn_dropout(softmax(att_star)) @ v_star)
+
+        # === 3) 计算 hat 分支的注意力 ===
+        # 先算 q_hat 与 k_star/k_hat 的 logits，并分别做 mask
+        att_hat_star = apply_mask(self.attend(q_hat, k_star), mask_star, val=-float("inf"))
+        att_hat_hat  = apply_mask(self.attend(q_hat, k_hat),  mask_hat,  val=-float("inf"))
+        # 都加上相对位置偏置
+        att_hat_star = att_hat_star + bias
+        att_hat_hat  = att_hat_hat + bias
+        if dependency_attn_mask is not None:
+            att_hat_star = apply_mask(att_hat_star, ~dependency_attn_mask)
+            att_hat_hat  = apply_mask(att_hat_hat,  ~dependency_attn_mask)
+
+        # 合并 logits
+        attn_hat_logits = merge_attn_logits(att_hat_star, att_hat_hat)  # (B, H, T, T)
+        attn_hat = self.attn_dropout(softmax(attn_hat_logits))
+
+        # 用 mask_star/mask_hat 分别加权 v_star/v_hat，再合并
+        y_hat = apply_mask(attn_hat, mask_star, val=0.0) @ v_star + \
+                apply_mask(attn_hat, mask_hat,  val=0.0) @ v_hat
+        y_hat = mlp(y_hat)
+
+        return y_star, y_hat
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor = None, attn_mask: torch.Tensor = None):
+        """
+        x:         (B, T, C)          — 自回归阶段的 query 输入
+        c:         (B, Lc, C)         — 如果 cross=True，则为 context 输入
+        attn_mask: (B|1, T, T)        — 有哪些位置可见（True 表示 keep），其余位置阻断
+        返回: y:   (B, T, C)
+        """
+        B, T, C = x.size()
+        dev = x.device
+        head_dim = C // self.n_head
+
+        # --- 1) 构造相对位置偏置 (1, H, T, T) ---
+        bias = self._get_rel_pos_bias(T, dev)
+
+        # --- 2) QKV 投影 ---
+        if self.cross:
+            # 跨注意力：query 来自 x，key/value 来自 c
+            q = self.q_attn(x)            # (B, T, C)
+            kv = self.kv_attn(c)          # (B, Lc, 2C)
+            k, v = kv.split(self.n_embd, dim=2)
+            # reshape 到多头
+            q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)   # (B, H, T, head_dim)
+            k = k.view(B, c.size(1), self.n_head, head_dim).transpose(1, 2)
+            v = v.view(B, c.size(1), self.n_head, head_dim).transpose(1, 2)
+        else:
+            # 普通自注意力：query/key/value 全来自 x
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+            q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
+            k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
+            v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+
+        # --- 3) 计算注意力分数并加偏置 ---
+        att = self.attend(q, k)            # (B, H, T, T)
+        att = att + bias                   # 相对位置偏置
+
+        if attn_mask is not None:
+            # attn_mask: (B, T, T) 或 (1, T, T)
+            # 对应的负 mask 为 ~attn_mask
+            m = attn_mask
+            if m.dim() == 3:
+                m = m.unsqueeze(1)        # (B, 1, T, T)
+            att = att.masked_fill(~m, float("-inf"))
+
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+
+        # --- 4) attention 加权 v 并输出 ---
+        y = att @ v                        # (B, H, T, head_dim)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.resid_dropout(self.c_proj(y))
+        return y
 
 class ChunkTransformerLayer(nn.Module):
+    # 新增：传入max_chunk_size参数用于更新后的attention
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mlp_dropout=0.1,
                  attn_kwargs={}, cond_attn_kwargs={},
                  conditional=False, AdaLN=False, norm_before_AdaLN=False,
                  is_moe:bool=False, # Added boolean to use moe to replace Mlp(FFN)
                  moe_multiple_gate:bool=False,
-                 moe_cfg=None
+                 moe_cfg=None,
+                 max_chunk_token_size:int=11
                  ):
         super().__init__()
         # layer normalization: 
@@ -168,6 +379,8 @@ class ChunkTransformerLayer(nn.Module):
         #   operation=(x.mean()/(x.std() + eps))
         self.ln_attn = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
         self.ln_mlp = nn.LayerNorm(hidden_size, elementwise_affine=not AdaLN, eps=1e-6)
+
+        self.max_len = max_chunk_token_size
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -187,13 +400,16 @@ class ChunkTransformerLayer(nn.Module):
             self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, 
                         drop=mlp_dropout)
             
-        self.attn = Attention(hidden_size, num_heads, **attn_kwargs)
+        # self.attn = Attention(hidden_size, num_heads, **attn_kwargs)
+        self.attn = RelChunkAttention(hidden_size, num_heads,max_len=self.max_len,  **attn_kwargs)
         
         self.conditional = conditional
         self.AdaLN = AdaLN
         if conditional:
             self.norm_cond = nn.LayerNorm(hidden_size, eps=1e-6)
-            self.cond_attn = Attention(hidden_size, num_heads, **cond_attn_kwargs, cross=True)
+            # self.cond_attn = Attention(hidden_size, num_heads, **cond_attn_kwargs, cross=True)
+            self.cond_attn = RelChunkAttention(hidden_size, num_heads,max_len=self.max_len,  **cond_attn_kwargs, cross=True)
+            
             if AdaLN:
                 self.adaLN_modulation = nn.Sequential(
                     nn.SiLU(),
@@ -1141,7 +1357,8 @@ class AutoRegressivePolicy(nn.Module):
                 conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False),
                 is_moe=self.is_moe,
                 moe_multiple_gate=self.moe_multiple_gate,
-                moe_cfg=self.moe_cfg
+                moe_cfg=self.moe_cfg,
+                max_chunk_token_size=11,
             )
             self.blocks.append(layer)
 
