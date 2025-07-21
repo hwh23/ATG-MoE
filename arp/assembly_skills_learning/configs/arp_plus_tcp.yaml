@@ -1,0 +1,56 @@
+defaults: 
+  - arp_plus # import arp_plus.yaml to root level
+  - _self_
+
+py_module: autoregressive_policy_plus
+
+model:
+  weights: outputs/moe_1GPU/lr1.25e-05/Emb_moeTrue_Transformer_moeFalse/2025_07_18_36BS_16epochs/2025-07-18_18-45/model_2000.pth
+
+
+env:
+  tasks: piston_sleeve_installation # stack_cups, before all
+  cameras: ["front","left_shoulder", "right_shoulder", "overhead"]
+  scene_bounds: [-0.5, -0.5, -0.2, 0.5, 0.5, 0.5] # [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized,待确认
+  image_size: 512
+  time_in_state: false
+  voxel_size: 100
+  episode_length: 25
+  rotation_resolution: 5
+  origin_style_state: true
+
+train.num_gpus: 1
+# ================================================ #
+
+hydra:
+  job:
+    name: tcp_moe
+    chdir: false
+  run:
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/2025_7.14_1tasks_${train.bs}BS_${train.epochs}epochs/${now:%Y-%m-%d_%H-%M} 
+    
+output_dir: ${hydra:run.dir} 
+
+wandb: 
+  project: arp_moe # before null
+  use_wandb: false
+  use_proxy: true
+  proxy_settings:
+    http_proxy: "http://10.81.36.233:7890"
+    https_proxy: "http://10.81.36.233:7890"
+    wandb_init_timeout: "600"
+    wandb_http_timeout: "300"
+
+swanlab:
+  project: ATG_MoE
+  use_swanlab: true
+
+tcp:
+  host: 127.0.0.1
+  port: 12500
+  max_queue_size: 10
+  queue_time_out: 0.01 # seconds
+  max_retries: null # retry forever
+  retry_interval: 3.0 # seconds
+  max_client_num: 5
+

@@ -7,6 +7,48 @@ import struct
 from .logging_config import get_logger
 logger = get_logger(__name__, False)
 
+""" Sample Messages: These are example messages that can be sent and received using the functions defined in this module.
+ClientMsg = {
+    "task": "piston_sleeve_installation",  
+    "frame_idx": int(0),  
+    "variation_idx": int(0),  # Optional 额外信息
+    "robot": "robot_name",  # Optional 额外信息
+    "description": "",  
+    "gripper_pose": np.array([0]*7),  
+    "images": {
+        "left_shoulder": {
+            "rgb": np.zeros((3, 512, 512), dtype=np.uint8),
+            "depth": np.zeros((512, 512), dtype=np.float32),
+            },
+        "overhead": {
+            "rgb": np.zeros((3, 512, 512), dtype=np.uint8),
+            "depth": np.zeros((512, 512), dtype=np.float32),
+            },
+        # Add more cameras as needed
+    },
+    "misc": {
+        "left_camera": {
+            "intrinsics": np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),  # Placeholder for camera intrinsics
+            "extrinsics": np.array([1.0]*7),  # Placeholder for camera extrinsics
+            "near": float(0.1),  # Near clipping plane (meter)
+            "far": float(100.0),  # Far clipping plane (meter)
+        },
+        "right_camera": {
+            "intrinsics": np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),  # Placeholder for camera intrinsics
+            "extrinsics": np.array([1.0]*7),  # Placeholder for camera extrinsics
+            "near": float(0.1),  # Near clipping plane (meter)
+            "far": float(100.0),  # Far clipping plane (meter)
+        },
+        # ...
+        },
+    } 
+
+ServerMsg = {
+    "task": "piston_sleeve_installation",  
+    "frame_idx": int(0),  
+    "gripper_pose": np.array([0]*7),  
+} 
+"""
 
 def send_pickle(conn, obj):
     data = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)

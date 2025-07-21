@@ -16,7 +16,6 @@ import os
 import torch
 import open3d as o3d
 from .logging_config import get_logger
-from .ur3_test_exr import range_to_point_cloud, pose_to_transformation_matrix
 
 logger = get_logger(__name__, False)
 
