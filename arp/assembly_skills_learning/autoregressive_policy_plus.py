@@ -101,8 +101,9 @@ class PolicyNetwork(nn.Module):
         # then produce rot and grip separately
 
         #region parse moe properties
-        self.is_moe = model_cfg.is_moe if hasattr(model_cfg, "is_moe") else False
-        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_moe") else None
+        self.is_transformer_moe = model_cfg.is_transformer_moe if hasattr(model_cfg, "is_transformer_moe") else False
+        self.is_emb_moe = model_cfg.is_emb_moe if hasattr(model_cfg, "is_emb_moe") else False
+        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_transformer_moe") and hasattr(model_cfg, "is_emb_moe") else None
         self.moe_multiple_gate = model_cfg.moe_multiple_gate if hasattr(model_cfg, "moe_multiple_gate") else False
         self.moe_cfg = model_cfg.moe if hasattr(model_cfg, "moe") else None
         #endregion
@@ -150,10 +151,10 @@ class PolicyNetwork(nn.Module):
                 LayerType.make(n_head=8, name='self')
             ] * 6,
             
-            is_moe=self.is_moe,
+            is_transformer_moe=self.is_transformer_moe,
+            is_emb_moe=self.is_emb_moe,
             moe_multiple_gate=self.moe_multiple_gate,
-            moe_cfg=self.moe_cfg,
-            
+            moe_cfg=self.moe_cfg,            
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
         
@@ -333,6 +334,7 @@ class PolicyNetwork(nn.Module):
         obs, pcd = preprocess_images_in_batch(observation, self.cameras)
         pc, img_feat = flatten_img_pc_to_points(obs, pcd)
 
+        
         with torch.no_grad():
             if self._transform_augmentation and self.training:
                 action_trans_con, action_rot, pc = apply_se3_augmentation( #! where the gt really comes out (for SE3 trans)
@@ -350,7 +352,6 @@ class PolicyNetwork(nn.Module):
                     if _action_rot[-1] < 0:
                         _action_rot = -_action_rot
                     action_rot[i] = _action_rot
-
         pc, img_feat = clamp_pc_in_bound(pc, img_feat, self.scene_bounds, skip=not self.move_pc_in_bound)
         pc_new, rev_trans_stage1, waypoint_stage1 = [], [], []
 
@@ -623,6 +624,9 @@ class PolicyNetwork(nn.Module):
             }
             # normalized with the number of elements in aux loss tensor
             loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()/loss_dict['aux_loss'].numel() * self.moe_weight
+            if 'aux_loss_adapter' in loss_dict:
+                loss_dict['aux_loss_adapter'] = loss_dict['aux_loss_adapter'].sum()/loss_dict['aux_loss_adapter'].numel() * self.moe_weight
+            
             return loss_dict
         else:
             final_waypoint = rev_trans_stage1[0](rev_trans_stage2(waypoint_stage2))

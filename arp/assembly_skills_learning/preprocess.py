@@ -66,16 +66,36 @@ def clamp_pc_in_bound(pc, img_feat, bounds, skip=False):
     """    
     if skip: return pc, img_feat
     x_min, y_min, z_min, x_max, y_max, z_max = bounds
+    xmin_check = pc[:, :, 0] < x_min
+    xmax_check = pc[:, :, 0] > x_max
+    ymin_check = pc[:, :, 1] < y_min
+    ymax_check = pc[:, :, 1] > y_max
+    zmin_check = pc[:, :, 2] < z_min
+    zmax_check = pc[:, :, 2] > z_max
+    xnan_check = torch.isnan(pc[:, :, 0])
+    ynan_check = torch.isnan(pc[:, :, 1])
+    znan_check = torch.isnan(pc[:, :, 2])
+    
+    assert xmin_check.all()==False, f'All point cloud x axis is out of boundary of x_min (<{x_min}).'
+    assert xmax_check.all()==False, f'All point cloud x axis is out of boundary of x_max (>{x_max}).'
+    assert ymin_check.all()==False, f'All point cloud y axis is out of boundary of y_min (<{y_min}).'
+    assert ymax_check.all()==False, f'All point cloud y axis is out of boundary of y_max (>{y_max}).'
+    assert zmin_check.all()==False, f'All point cloud z axis is out of boundary of z_min (<{z_min}).'
+    assert zmax_check.all()==False, f'All point cloud z axis is out of boundary of z_max (>{z_max}).'
+    assert xnan_check.all()==False, 'All point cloud x is nan value.'
+    assert ynan_check.all()==False, 'All point cloud y is nan value.'
+    assert znan_check.all()==False, 'All point cloud z is nan value.'
+    
     inv_pnt = ( # invalid points
-        (pc[:, :, 0] < x_min)
-        | (pc[:, :, 0] > x_max)
-        | (pc[:, :, 1] < y_min)
-        | (pc[:, :, 1] > y_max)
-        | (pc[:, :, 2] < z_min)
-        | (pc[:, :, 2] > z_max)
-        | torch.isnan(pc[:, :, 0])
-        | torch.isnan(pc[:, :, 1])
-        | torch.isnan(pc[:, :, 2])
+        xmin_check
+        | xmax_check
+        | ymin_check
+        | ymax_check
+        | zmin_check
+        | zmax_check
+        | xnan_check
+        | ynan_check
+        | znan_check
     )
     # TODO: move from a list to a better batched version
     pc = [pc[i, ~_inv_pnt] for i, _inv_pnt in enumerate(inv_pnt)]

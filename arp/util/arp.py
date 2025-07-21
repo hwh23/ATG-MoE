@@ -385,13 +385,15 @@ class ChunkTransformerLayer(nn.Module):
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         
-        # TODO：可能的前馈网络位置
         self.is_moe = is_moe
         if is_moe:
-            from arp.rlb.utils_with_rlbench import TASK_TO_ID
+            # TODO 这里要改
+            from arp.assembly_skills_learning.utils.structure import SKILL_TO_ID
+            # from arp.rlb.utils_with_rlbench import TASK_TO_ID
             self.propagate = MoE(input_size=hidden_size,
                            head_size=mlp_hidden_dim,
-                           task_num=len(TASK_TO_ID),
+                        #    task_num=len(TASK_TO_ID),
+                           task_num=len(SKILL_TO_ID),
                            moe_multiple_gate=moe_multiple_gate,
                            moe_cfg=moe_cfg,
                            drop=mlp_dropout
@@ -1331,8 +1333,9 @@ class AutoRegressivePolicy(nn.Module):
         self.token_name_2_ids = {}
         self.f_token_name_2_ids = lambda name: self.token_name_2_ids.get(name, name)
         
+        self.is_emb_moe = cfg.is_emb_moe
         #region moe properties 
-        self.is_moe = cfg.is_moe
+        self.is_transformer_moe = cfg.is_transformer_moe
         self.moe_multiple_gate = cfg.moe_multiple_gate
         self.moe_cfg = cfg.moe_cfg
         #endregion
@@ -1355,7 +1358,7 @@ class AutoRegressivePolicy(nn.Module):
                 cfg.n_embd, layer_cfg['n_head'], mlp_ratio=layer_cfg['mlp_ratio'], mlp_dropout=layer_cfg['mlp_dropout'],
                 attn_kwargs=layer_cfg['attn_kwargs'], cond_attn_kwargs=layer_cfg['cond_attn_kwargs'],
                 conditional=layer_cfg['condition_on'], AdaLN=layer_cfg.get('AdaLN', False), norm_before_AdaLN=layer_cfg.get('norm_before_AdaLN', False),
-                is_moe=self.is_moe,
+                is_moe=self.is_transformer_moe,
                 moe_multiple_gate=self.moe_multiple_gate,
                 moe_cfg=self.moe_cfg,
                 max_chunk_token_size=11,
@@ -1367,6 +1370,17 @@ class AutoRegressivePolicy(nn.Module):
             self.layer_norms = nn.ModuleList([nn.LayerNorm(cfg.n_embd) for _ in range(len(cfg.layers))])
         else:
             self.final_ln = nn.LayerNorm(cfg.n_embd)
+
+        # embedding MoE part
+        if self.is_emb_moe:
+            from arp.rlb.utils_with_rlbench import TASK_TO_ID
+            self.emb_moe_adapter = MoE(input_size=cfg.n_embd,
+                           head_size=int(cfg.n_embd * layer_cfg['mlp_ratio']),
+                           task_num=len(TASK_TO_ID),
+                           moe_multiple_gate=self.moe_multiple_gate,
+                           moe_cfg=self.moe_cfg,
+                           drop=layer_cfg['mlp_dropout']
+                        )
 
         self.cfg = cfg
         self.initialize_weights()
@@ -1479,7 +1493,7 @@ class AutoRegressivePolicy(nn.Module):
         losses = defaultdict(list)
         if chk_ids is None: chk_ids = torch.arange(0, tk_ids.size(1), device=dev)[None, ...]
         if len(chk_ids.shape) == 1: chk_ids = chk_ids[None, ...]
-        assert chk_ids.size(1) == tk_ids.size(1), "chunk ids and token should have the same length"
+        assert chk_ids.size(1) == tk_ids.size(1), "chunk ids and token should have the same length"       
         tk_codes = self.token_coder.encode(tks, tk_ids)
         
         dependency_attn_mask = ChunkTransformerLayer.dependency_attn_mask(tk_ids, 
@@ -1491,13 +1505,26 @@ class AutoRegressivePolicy(nn.Module):
         embs_hat = self.chunk_embedder(chk_ids, tk_ids)
         assert not torch.isnan(embs_hat).any(), "Found NaN in embs_hat! Check input_ids and embedding weights."
 
+        # 注意generate要跟着做修改
+        if self.is_emb_moe:
+            embs_hat, aux_loss_adapter = self.emb_moe_adapter(embs_hat, task_ids)
+
         if match_layer:
             layer_ids = [i for i, ln in enumerate(self.cfg.layers) if match_layer in ln['name']]
         else:
             layer_ids = list(range(len(self.blocks)))
 
+        # # TODO 位置更改，合并之后处理效果不好
+        # #-------------------------------------------------------------#
+        # embs = torch.cat([embs_star, embs_hat], dim=1)
+        # aux_loss_adapter = 0.0
+        # if self.is_emb_moe:
+        #     embs, aux_loss_adapter = self.emb_moe_adapter(embs, task_ids)
+
+        # embs_star, embs_hat = embs.split([embs_star.size(1), embs_hat.size(1)], dim=1)
+        #-------------------------------------------------------------#
+
         # interleave forward 
-        # 这里调用了forward
         # self.forward
         (embs_star, embs_hat), aux_loss = self([embs_star, embs_hat], chk_ids, contexts=contexts, layer_ids=layer_ids,
                                    dependency_attn_mask=dependency_attn_mask, training=True, task_ids=task_ids)
@@ -1524,6 +1551,9 @@ class AutoRegressivePolicy(nn.Module):
 
         loss_dict = {k: sum(v) / len(v) for k, v in losses.items()}
         loss_dict['aux_loss'] = aux_loss
+        if self.is_emb_moe:
+            loss_dict['aux_loss_adapter'] = aux_loss_adapter
+
         if log_prob:
             return loss_dict, cond_log_probs
         else:
@@ -1592,7 +1622,15 @@ class AutoRegressivePolicy(nn.Module):
             # 嵌入转换：将现有的 token 编码转换为嵌入表示，并为新 chunk 创建嵌入。
             prompt_embs = self.token_codes_to_embeddings(tk_codes, tk_ids, **chk_contexts)
             chunk_embs = self.chunk_embedder(next_chk_ids, next_tk_ids)
+            # 加上emb moe层
+            if self.is_emb_moe:
+                chunk_embs, _ = self.emb_moe_adapter(chunk_embs, task_ids)
+
             embs = torch.cat([prompt_embs, chunk_embs], dim=1) 
+
+            # 加上emb moe层
+            # if self.is_emb_moe:
+            #     embs, _ = self.emb_moe_adapter(embs, task_ids)
 
             # 确定层 ID：根据匹配规则选择要使用的 Transformer 层。
             match_layer_ = match_layer if isinstance(match_layer, str) else match_layer.get(curr_chk_id, "")

@@ -22,218 +22,12 @@ from rlbench.backend.observation import Observation
 from utils.structure import *
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import Dataset, DataLoader, RandomSampler
-from rlbench.backend.const import DEPTH_SCALE
+# from rlbench.backend.const import DEPTH_SCALE
 from scipy.spatial.transform import Rotation as R
-
-# TODO　初步修改完成，常量的定义在utils.structure
-# # def get_demo_essential_info(data_path, episode_ind):
-# def get_proprio_info(data_path, episode_ind):
-#     EPISODE_FOLDER = 'episode%d'
-#     episode_path = osp.join(data_path, EPISODE_FOLDER % episode_ind)
-#     # low dim pickle file
-#     with open(osp.join(episode_path, PROPRIOCEPTION), 'r', encoding='utf-8') as f:
-#         data = json.load(f)
-#     return {
-#             'end_pose': data.get('position'),
-#             'joint': data.get('joint'),
-#             'time_step': data.get('step')
-#         }
-
-# 四元数向旋转矩阵的转换函数
-def quat_to_rot_matrix(q: np.ndarray) -> np.ndarray:
-    """
-    q: array_like, shape (4,), in order [qx, qy, qz, qw]
-    returns: R, shape (3,3)
-    """
-    q = q / np.linalg.norm(q)
-    x, y, z, w = q
-    # quaternion to rotation matrix
-    R = np.array([
-        [1 - 2 * (y*y + z*z),     2 * (x*y - z*w),         2 * (x*z + y*w)],
-        [    2 * (x*y + z*w), 1 - 2 * (x*x + z*z),         2 * (y*z - x*w)],
-        [    2 * (x*z - y*w),     2 * (y*z + x*w),     1 - 2 * (x*x + y*y)]
-    ])
-    return R
-
-def oned_ext_to_trans_mat(ext_vec: np.ndarray) -> np.ndarray:
-    """
-    Convert extrinsics vector to 4x4 transformation matrix.
-
-    Parameters:
-      ext_vec: shape (7,), [tx, ty, tz, qx, qy, qz, qw]
-        translation and quaternion in world frame.
-
-    Returns:
-      ext_mat: shape (4,4), extrinsics matrix.
-    """
-    assert ext_vec.shape == (7,)
-    # Extract translation and quaternion
-    t = ext_vec[:3]
-    q = ext_vec[3:7]
-
-    # Convert quaternion to rotation matrix
-    R = quat_to_rot_matrix(q)
-
-    # Build 4x4 transformation matrix
-    ext_mat = np.eye(4)
-    ext_mat[:3, :3] = R
-    ext_mat[:3, 3] = t
-    return ext_mat
-
-# 将相机坐标从世界坐标系下向机械臂坐标系下转换（采集到的数据，同坐标原点，左右手坐标系不同）
-def cam_ext_world_to_robot(ext_vec: np.ndarray) -> np.ndarray:
-    """
-    Convert camera extrinsics from world LH (Y-up) to robot RH (Z-up).
-
-    Parameters:
-      ext_vec: shape (7,), [tx, ty, tz, qx, qy, qz, qw]
-        translation and quaternion in world frame.
-
-    Returns:
-      ext_mat_robot: shape (4,4), extrinsics matrix in robot frame.
-    """
-    assert ext_vec.shape == (7,)
-    # Extract
-    t_w = ext_vec[:3]
-    q_w = ext_vec[3:7]
-
-    # Convert quaternion to rotation in world frame
-    R_w = quat_to_rot_matrix(q_w)
-
-    # Define mapping from world LH (Y-up) to robot RH (Z-up)
-    M = np.array([
-        [ 1,  0,  0],
-        [ 0,  0, -1],
-        [ 0,  1,  0]
-    ])
-
-    # Transform rotation and translation
-    R_r = M @ R_w
-    t_r = M @ t_w
-
-    # Build 4x4 extrinsics in robot frame
-    ext_mat = np.eye(4)
-    ext_mat[:3, :3] = R_r
-    ext_mat[:3, 3]  = t_r
-    return ext_mat
-
-def retreive_full_observation(cameras, essential_obs, episode_path, i, load_mask=False, skip_rgb=False):
-    
-    IMAGE_RGB = 'rgb'
-    IMAGE_DEPTH = 'depth'
-    IMAGE_FORMAT  = '%d.png'
-
-    obs = {}
-  
-    # TODO：确认一下这个超参数DEPTH_SCALE
-    for camera in cameras:
-        if load_mask:
-            obs[f"{camera}_mask"] = np.array(
-                Image.open(osp.join(episode_path, f"{camera}_depth", IMAGE_FORMAT % i))# mask 改成depth
-            )
-        if not skip_rgb:
-            obs[f"{camera}_rgb"] =  np.array(Image.open(osp.join(episode_path, '%s_%s' % (camera, IMAGE_RGB), IMAGE_FORMAT % i)).convert("RGB"))
-        obs[f'{camera}_depth'] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (camera, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
-        near = essential_obs.misc['%s_camera_near' % (camera)]
-        far = essential_obs.misc['%s_camera_far' % (camera)]
-        obs[f'{camera}_depth'] = near + obs[f'{camera}_depth'] * (far - near)
-        obs[f'{camera}_point_cloud'] = VisionSensor.pointcloud_from_depth_and_camera_params(obs[f'{camera}_depth'],
-                                                                                            cam_ext_world_to_robot(np.array(essential_obs.misc[f'{camera}_camera_extrinsics'])),
-                                                                                            np.array(essential_obs.misc[f'{camera}_camera_intrinsics']).reshape(3,3)
-                                                                                            )
-    return obs
-
-
-def encode_time(t, episode_length=25):
-    return (1. - (t / float(episode_length - 1))) * 2. - 1.
-
-def _is_stopped(demo, i, stopped_buffer, pos_thresh=1e-4, rot_thresh=1e-3, joint_pos_thresh=1e-4):
-    sec_next_is_not_final = i <= (len(demo) - 2)
-    if sec_next_is_not_final is False:
-        return False
-    
-    pos0 = demo[i-1].gripper_pose[:3]
-    pos1 = demo[i].gripper_pose[:3]
-    pos2 = demo[i+1].gripper_pose[:3]
-    
-    quat0 = demo[i-1].gripper_pose[3:]
-    quat1 = demo[i].gripper_pose[3:]
-    quat2 = demo[i+1].gripper_pose[3:]
-    
-    gripper0 = demo[i-1].gripper_pose[-1]
-    gripper1 = demo[i].gripper_pose[-1]
-    gripper2 = demo[i+1].gripper_pose[-1]
-    
-    pos_delta = np.linalg.norm(pos1 - pos0) + np.linalg.norm(pos2 - pos1)
-    pos_unchanged = pos_delta < pos_thresh
-    
-    rot_delta = np.linalg.norm(quat1 - quat0) + np.linalg.norm(quat2 - quat1)
-    rot_unchanged = rot_delta < rot_thresh
-    
-    gripper_delta = abs(gripper1 - gripper0) + abs(gripper2 - gripper1) + abs(gripper2 - gripper0) # 0 for unchanged, > 1 for changed
-    gripper_unchanged = gripper_delta == 0
-    
-    joint_pos_delta = np.linalg.norm(demo[i].joint_positions - demo[i-1].joint_positions) + \
-                          np.linalg.norm(demo[i+1].joint_positions - demo[i].joint_positions)
-    joint_pos_unchanged = joint_pos_delta < joint_pos_thresh 
-    
-    stopped = (stopped_buffer <= 0 and pos_unchanged and rot_unchanged and gripper_unchanged and joint_pos_unchanged)
-    return stopped
-
-# def _is_stopped(demo, i, obs, stopped_buffer, delta=0.1):
-#     next_is_not_final = i != (len(demo) - 2)
-#     gripper_state_no_change = (
-#             i < (len(demo) - 2) and
-#             (obs.gripper_open == demo[i + 1].gripper_open and
-#             obs.gripper_open == demo[i - 1].gripper_open and
-#             demo[i - 2].gripper_open == demo[i - 1].gripper_open))
-#     small_delta = np.allclose(obs.joint_velocities, 0, atol=delta)
-#     stopped = (stopped_buffer <= 0 and small_delta and
-#             next_is_not_final and gripper_state_no_change)
-#     return stopped
-
-def keypoint_discovery(demo: Demo, stopping_delta: float=0.1, stop_buffer_max = 4) -> List[int]:
-    episode_keypoints = []
-    # prev_gripper_status = get_gripper_status(demo[0].gripper_open)
-    prev_gripper_status = demo[0].gripper_open
-    stopped_buffer = 0
-    for i, obs in enumerate(demo):
-        # stopped = _is_stopped(demo, i, obs, stopped_buffer, stopping_delta)
-        stopped = _is_stopped(demo, i, stopped_buffer) # check if the gripper is stationary
-        stopped_buffer = stop_buffer_max if stopped else stopped_buffer - 1
-        # If change in gripper, or end of episode.
-        last = i == (len(demo) - 1)
-        # current_gripper_status = get_gripper_status(obs.gripper_open)
-        current_gripper_status = obs.gripper_open
-        if i != 0 and (current_gripper_status != prev_gripper_status or
-                        last or stopped):
-            episode_keypoints.append(i)
-        prev_gripper_status = current_gripper_status
-    if len(episode_keypoints) > 1 and (episode_keypoints[-1] - 1) == \
-            episode_keypoints[-2]:
-        episode_keypoints.pop(-2)
-    return episode_keypoints
-
-
-def query_next_kf(f, kfs, return_index=False):
-    for i, kf in enumerate(kfs):
-        if kf > f:
-            if return_index:
-                return i
-            else:
-                return kf
-    raise RuntimeError("No more keyframes")
-
-
-def get_reasonable_low_dim_state(essential_obs): # dim=18
-    return np.array([
-            essential_obs.gripper_open,
-            essential_obs.ignore_collisions,
-            *essential_obs.gripper_joint_positions,
-            *essential_obs.joint_positions,
-            *essential_obs.gripper_pose
-        ]).astype(np.float32) # 18
-
+# 轴角转换为四元数
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+from utils.data_util import *
 
 class TransitionDataset(Dataset):
     def __init__(self, root: str, tasks: List[str], cameras:List[str]=["front", "left_shoulder", "right_shoulder", "wrist"],
@@ -241,6 +35,8 @@ class TransitionDataset(Dataset):
                 voxel_size:int=100, rotation_resolution:int=5, cached_data_path=None,
                 origin_style_state=True,
                 episode_length=25, time_in_state=False, k2k_sample_ratios={}, o2k_window_size=10,
+                variation_path:str='all_variations',
+                episode_path:str=None,
                 shuffle:bool=False):
         super().__init__()
         self._num_batches = batch_num
@@ -272,9 +68,13 @@ class TransitionDataset(Dataset):
         else:
             self.data = {}
             for task in tqdm(tasks, desc="building meta data"):
-                episodes_path = osp.join(root, task, 'all_variations/episodes')
+                episodes_path = osp.join(root, task, variation_path, 'episodes')
+                if episode_path is not None:
+                    episodes = [episode_path]
+                else:
+                    episodes = os.listdir(episodes_path)
                 if task not in self.data: self.data[task] = {}
-                for episode in tqdm(os.listdir(episodes_path), desc="episodes", leave=False):
+                for episode in tqdm(episodes, desc="episodes", leave=False):
                     if 'episode' not in episode:
                         continue
                     else:
@@ -309,9 +109,10 @@ class TransitionDataset(Dataset):
             with open(os.path.join(episode_folder, 'proprioception', proprioception_file), 'r', encoding='utf-8') as f:
                 proprioception = json.load(f)    
             
-            gripper_open_continuous = np.array(proprioception.get('gripper_joint_positions', [0.0]*7)[-1])
+            gripper_open_continuous = np.array(proprioception.get('position', [0.0]*7)[-1])
+            gripper_pose=np.array(proprioception.get('position', [0.0]*7)[:6]) # 旋转使用轴角表示
             observation = Assembly_Observation(
-                                    gripper_pose=np.array(proprioception.get('position', [0.0]*7)),    
+                                    gripper_pose=axis_angle_to_quaternion_pose(gripper_pose), # 四元数表示，七维
                                     gripper_matrix=None,
                                     gripper_open=float(gripper_open_continuous > 0.5),
                                     gripper_joint_positions= np.repeat(gripper_open_continuous * 0.04, 2),
@@ -413,6 +214,9 @@ class TransitionDataset(Dataset):
             essential_kp_obs = episode['obs'][kp_frame_id]
             obs_media_dict = retreive_full_observation(self.cameras, essential_obs, episode_path, obs_frame_id)
 
+            # 测试点云范围
+            # print_pointcloud_xyz_ranges(obs_media_dict,self.cameras)
+
             if self.origin_style_state:
                 curr_low_dim_state = np.array([essential_obs.gripper_open, *essential_obs.gripper_joint_positions])
                 if self.include_time_in_state:
@@ -441,6 +245,10 @@ class TransitionDataset(Dataset):
 
                 **obs_media_dict
             }
+
+            # 点云可视化 For debugging
+            # for cam in self.cameras:
+            #     save_combined_pointcloud_and_gripper(sample_dict, cam, save_dir=osp.join(self.root, task, 'point_clouds_vis',f'{cam}'))
 
             for k, v in sample_dict.items():
                 batch[k].append(v)

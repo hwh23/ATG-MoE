@@ -1,12 +1,14 @@
 py_module: autoregressive_policy_plus
 
 model:
-  weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_2GPUs/lr2.5e-05/moeTrue/2025-06-26_22-18/model_50000.pth 
-
+  weights: null
+  # weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_1GPU/lr1.25e-05/Emb_moeTrue_Transformer_moeFalse/2025_07_14_36BS_10epochs/2025-07-14_16-26/model_30000.pth
+  
   hp:
     # rot_z_weight_factor: 1
     # rot_z_weight_max: 2
-    is_moe: true # true
+    is_emb_moe: true
+    is_transformer_moe: false # true
     moe_weight: 1 #2 
     moe:
       multiple_gate: True # false
@@ -51,7 +53,7 @@ model:
 
     # lr should be thought on per sample basis
     # effective lr is multiplied by bs * num_devices
-    lr: 2.5e-5 # 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (cfg.train.num_gpus * cfg.train.bs),少GPU应对应增大lr
+    lr: 1.25e-5 # 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (cfg.train.num_gpus * cfg.train.bs),少GPU应对应增大lr
     warmup_steps: 2000
     optimizer_type: lamb
     lr_cos_dec: true
@@ -72,28 +74,30 @@ model:
 
 env:
   tasks: piston_sleeve_installation # stack_cups, before all
-  cameras: ["front", "left_shoulder", "overhead"]
-  scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized
-  image_size: 512
+  cameras: ["front","left_shoulder", "right_shoulder", "overhead"]
+  scene_bounds: [-0.5, -0.5, -0.2, 0.5, 0.5, 0.5] # [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized,待确认
+  image_size: 512 #　TODO　有改动要记得修改
   time_in_state: false
   voxel_size: 100
-  episode_length: 25
+  episode_length: 25 # TODO 不对，encode time 相关
   rotation_resolution: 5
   origin_style_state: true
 
 train:
-  bs: 24 #48 #before 96 # 48
+  bs: 36 #48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 10 # 16 # before 100 # 16
-  num_gpus: 2 # 1 # before 4
-  num_workers: 2 # before 8, need larger value
+  epochs: 16 # 16 # before 100 # 16
+  num_gpus: 1 # 1 # before 4
+  num_workers: 4 # before 8, need larger value
   num_transitions_per_epoch: 160000 # 80000 #before 160000 # iters=num_transitions_per_epoch*epochs/bs/world_size
   disp_freq: 100
   cached_dataset_path: null
-  save_freq: 5000 # before 10000
+  save_freq: 2000 # before 10000
   eval_mode: false
   k2k_sample_ratios: 
     piston_sleeve_installation: 1.0
+  variation_path:  all_variations # variation0 # all_variations
+  episode_path: null # episode4 # null
 
 eval:
   datafolder: ./data/test
@@ -108,16 +112,13 @@ eval:
 
 hydra:
   job:
-    name: moe_2GPUs # test # default # arp_plus # eval.arp_plus
-    # name: arp_plus_moe_1gate # default # arp_plus # eval.arp_plus
+    name: moe_${train.num_gpus}GPU #pick_green_var0 # test # default # arp_plus # eval.arp_plus
     chdir: false
   run:
-    # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/dubug
-    # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M} # 多卡时不要用now
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M} 
-  
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/${now:%Y_%m_%d}_${train.bs}BS_${train.epochs}epochs/${now:%Y-%m-%d_%H-%M} 
+    
 output_dir: ${hydra:run.dir} 
-# output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'
+
 wandb: 
   project: arp_moe # before null
   use_wandb: false
@@ -128,9 +129,6 @@ wandb:
     wandb_init_timeout: "600"
     wandb_http_timeout: "300"
 
-tcp:
-  host: 127.0.0.1
-  port: 5050
-  max_queue_size: 10
-  max_retries: null # retry forever
-  retry_interval: 3.0 # seconds
+swanlab:
+  project: ATG_MoE
+  use_swanlab: true
