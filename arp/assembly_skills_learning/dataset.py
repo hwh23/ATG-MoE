@@ -45,8 +45,9 @@ class TransitionDataset(Dataset):
         self.cameras = cameras
         self.origin_style_state = origin_style_state
         self.shuffle=shuffle
-        if not origin_style_state:
-            assert not time_in_state, "should not include a discrete timestep in state"
+        # 很奇怪，这两个bool没看到有什么必然联系
+        # if not origin_style_state:
+        #     assert not time_in_state, "should not include a discrete timestep in state"
 
         self.episode_length = episode_length
         self.root = root
@@ -114,13 +115,13 @@ class TransitionDataset(Dataset):
             observation = Assembly_Observation(
                                     gripper_pose=axis_angle_to_quaternion_pose(gripper_pose), # 四元数表示，七维
                                     gripper_matrix=None,
-                                    gripper_open=float(gripper_open_continuous > 0.5),
-                                    gripper_joint_positions= np.repeat(gripper_open_continuous * 0.04, 2),
+                                    gripper_open=float(gripper_open_continuous > 0.5), # BEFORE 0.5
+                                    gripper_joint_positions= np.repeat(gripper_open_continuous * 0.04, 2), # TODO 0.04?
                                     gripper_touch_forces= None, #np.array(proprioception.get('gripper_touch_forces', [0.0]*6)),
                                     joint_positions=np.array(proprioception.get('joint', [0.0]*6)),
                                     joint_velocities=None,
                                     joint_forces=None,
-                                    ignore_collisions=np.array(0.),
+                                    ignore_collisions=np.array(0.),# 之前都使用np.array(0.),
                                     task_low_dim_state= None, #np.array([0.0]*185),
                                     misc=misc
                                     )
@@ -226,6 +227,12 @@ class TransitionDataset(Dataset):
                     ).astype(np.float32)
             else:
                 curr_low_dim_state = get_reasonable_low_dim_state(essential_obs)
+                # 尝试二者同时启用
+                if self.include_time_in_state:
+                    curr_low_dim_state = np.concatenate(
+                        [curr_low_dim_state,
+                        [encode_time(kp, episode_length=self.episode_length)]] #episode_length 不再写死(len(episode['keypoints']))，不对，还是得写死，否则测试时怎么处理
+                    ).astype(np.float32)
 
             sample_dict = {
                 # "lang_goal_tokens": episode['lang_tokens'],
@@ -245,10 +252,9 @@ class TransitionDataset(Dataset):
 
                 **obs_media_dict
             }
-
             # 点云可视化 For debugging
             # for cam in self.cameras:
-            #     save_combined_pointcloud_and_gripper(sample_dict, cam, save_dir=osp.join(self.root, task, 'point_clouds_vis',f'{cam}'))
+            #     save_combined_pointcloud_and_gripper(sample_dict, essential_obs.gripper_pose, cam, save_dir=osp.join(self.root, task, f'train_data_point_clouds_vis/{task}',f'{cam}'))
 
             for k, v in sample_dict.items():
                 batch[k].append(v)
