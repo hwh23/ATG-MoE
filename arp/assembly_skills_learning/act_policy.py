@@ -38,7 +38,8 @@ from utils.layers import (
 import math
 import utils.act as act
 from autoregressive_policy import Policy, MultiViewTransformer
-from arp.arp import ConvUpsample
+# from arp.arp import ConvUpsample
+from arp.util.arp import ConvUpsample
 
 
 def embed_position_2d(positions, n_embd, N=10000):
@@ -126,6 +127,11 @@ class PolicyNetwork(nn.Module):
         self.stage2_gripper_fc = nn.ModuleList([nn.Linear(dim_model, 2) for _ in range(3)])
 
         self.cfg = model_cfg
+        self.exponential_weight = 1.0  # Fixed weight for ACT model
+
+    def update(self):
+        """Empty update method to satisfy the interface expected by autoregressive_policy.py"""
+        pass
 
     
     def multi_view_coordinate_sampler(self, lst_of_spatial_logits):

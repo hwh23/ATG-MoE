@@ -5,7 +5,7 @@ hydra:
   run:
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M} # 多卡时不要用now
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.4_100epochs_all_tasks_1gpu/${now:%Y-%m-%d_%H-%M} 
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.27_3tasks_1gpu_4MlpExperts_alpha_oldChunk/${now:%Y-%m-%d_%H-%M} 
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/2025_7.22_2tasks_NoWristCam_20epochs/${now:%Y-%m-%d_%H-%M} 
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.20_3tasks_1gpu_oldChunk/${now:%Y-%m-%d_%H-%M} 
 
 # ================================================ #
@@ -19,12 +19,13 @@ model:
   hp:
     # rot_z_weight_factor: 1
     # rot_z_weight_max: 2
-    is_moe: true # true
+    is_emb_moe: true
+    is_transformer_moe: true # true
     moe_weight: 1 # 0.5 #2 
     moe:
       multiple_gate: True # false
       num_experts: 4 # 4 #16 #8
-      k: 1 #2 #4 #可以留一个num_moe_layers的接口
+      k: 1 #1 #4 #可以留一个num_moe_layers的接口
       num_shared_experts: 0 # not available yet
     add_corr: true
     add_depth: true
@@ -84,8 +85,8 @@ model:
 
 
 env:
-  tasks: stack_cups,turn_tap,open_drawer # stack_cups,turn_tap,open_drawer,push_buttons,slide_block_to_color_target # stack_cups, before all
-  cameras: ["front", "left_shoulder", "right_shoulder", "wrist"]
+  tasks: meat_off_grill,open_drawer #,insert_onto_square_peg # stack_cups,turn_tap,open_drawer # stack_cups,turn_tap,open_drawer,push_buttons,slide_block_to_color_target # stack_cups, before all
+  cameras:  ["front", "left_shoulder", "right_shoulder", "overhead"] # ["front", "left_shoulder", "right_shoulder", "wrist"]
   scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized
   image_size: 128
   time_in_state: false
@@ -97,7 +98,7 @@ env:
 train:
   bs: 48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 16 # 30 # 16 # before 100 # 16
+  epochs: 12 # 18  # 16 # before 100 
   num_gpus: 1 # before 4
   num_workers: 16 # before 8, need larger value
   num_transitions_per_epoch: 160000 # 80000 #before 160000 # iters=num_transitions_per_epoch*epochs/bs/world_size
@@ -135,4 +136,16 @@ eval:
   
 output_dir: ${hydra:run.dir} 
 # output_dir: outputs/eval.arp_plus/`date +"%Y-%m-%d_%H-%M"`+'stack_cups_16666_lr1e-4'
-wandb: arp_moe # before null
+wandb: 
+  project: arp_moe # before null
+  use_wandb: false
+  use_proxy: true
+  proxy_settings:
+    http_proxy: "http://10.81.36.233:7890"
+    https_proxy: "http://10.81.36.233:7890"
+    wandb_init_timeout: "600"
+    wandb_http_timeout: "300"
+
+swanlab:
+  project: arp_moe
+  use_swanlab: true

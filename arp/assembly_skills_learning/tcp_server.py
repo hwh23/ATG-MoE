@@ -5,7 +5,7 @@ import time
 import torch
 import numpy as np
 from utils import configurable, DictConfig, config_to_dict
-from autoregressive_policy import Policy
+# from autoregressive_policy import Policy
 import clip
 import warnings
 from dataset import SKILL_TO_ID
@@ -40,6 +40,8 @@ class ARP_TCP_Client:
         self.max_client_num = cfg.tcp.max_client_num
         self.queue_time_out = cfg.tcp.queue_time_out
         self.cfg = cfg
+        self.time_in_state =cfg.env.time_in_state if hasattr(cfg.env, 'time_in_state') else False
+        self.episode_length =cfg.env.episode_length if hasattr(cfg.env, 'episode_length') else 8
         self.device = cfg.eval.device
         self.visualize_pc:bool = visualize_pc
         
@@ -50,7 +52,8 @@ class ARP_TCP_Client:
         else:
             # Load the CLIP model (ViT-B/32 is common)
             self.clip_model, _ = clip.load("ViT-B/32", device=self.device)
-            self.model:Policy = self.setup_model(cfg)
+            # self.model:Policy = self.setup_model(cfg)
+            self.model = self.setup_model(cfg)
         
         """Socket and Connection set up"""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -104,7 +107,7 @@ class ARP_TCP_Client:
         Policy, PolicyNetwork = MOD.Policy, MOD.PolicyNetwork
         net = PolicyNetwork(cfg.model.hp, cfg.env, render_device=f"cuda:{self.device}").to(self.device)
         agent = Policy(net, cfg.model.hp)
-        agent.build(training=True, device=self.device)
+        agent.build(training=False, device=self.device)
 
         # Load weights
         logger.info(f'{log_prefix("Setup")} Loading Model weights from {cfg.model.weights}')
@@ -168,10 +171,13 @@ class ARP_TCP_Client:
                     
                     logger.info(f"{log_prefix('Process', connection.addr)} | Start  frame {msg['frame_idx']}")
                     msg['gripper_pose'] = np.array(msg['gripper_pose']).squeeze()
-                    msg['gripper_open'] =  msg['gripper_pose'][-1]
+                    # 提前转为正确格式
+                    msg['gripper_pose'] = axis_angle_to_quaternion_pose(msg['gripper_pose'][:-1])
+                    msg['gripper_open'] =  float(msg['gripper_pose'][-1] > 0.5) # TODO 这里原先写< 0.5 打个断点确认一下
 
                     obs = {}
                     obs['task'] = msg['task']
+                    logger.info('task: {}'.format(msg['task']))
                     obs['task_idx'] = SKILL_TO_ID[msg['task']]
                     obs['frame_idx'] = msg['frame_idx']
                     obs['description'] = msg['description']
@@ -179,9 +185,13 @@ class ARP_TCP_Client:
                     obs['variation_idx'] = msg.get('variation_idx')
                     obs['robot'] = msg.get('robot')
                     # Process message and save results to obs 
-                    obs['gripper_pose'] = torch.tensor(axis_angle_to_quaternion_pose(msg['gripper_pose'][:-1]), dtype=torch.float32).to(self.device)
-                    obs['gripper_open'] = torch.tensor(msg['gripper_open'] < 0.5, dtype=torch.float32).to(self.device)
-                    obs['low_dim_state'] = get_low_dim_state(self.cfg.env.origin_style_state, msg).view(1, -1)
+
+                    obs['gripper_pose'] = torch.tensor(msg['gripper_pose'], dtype=torch.float32).to(self.device)
+                    obs['gripper_open'] = torch.tensor(msg['gripper_open'], dtype=torch.float32).to(self.device)
+                    # 这里传的是msg，所以msg里的pose要提前转换为四元数，open也要转
+                    # TODO 如果要做时间步编码，需要维护一个当前kp,这里使用obs['frame_idx']
+
+                    obs['low_dim_state'] = get_low_dim_state(self.cfg.env.origin_style_state, msg, include_time_in_state=self.time_in_state,episode_length=self.episode_length).view(1, -1)
                     obs['lang_goal_embs'] = get_lang_emb(msg, self.cfg.model.hp.add_lang, self.debug_mode, self.clip_model, self.device)
                     # Get obs rgb, depth, pointclouds
                     append_rgbd_pc_to_obs(msg, obs, self.visualize_pc)
@@ -203,15 +213,15 @@ class ARP_TCP_Client:
                     msg = connection.proc_queue.get(timeout=self.queue_time_out)
                     start_time = time.time() 
                     logger.info(f"{log_prefix('Model', connection.addr)} | Start  frame {msg['frame_idx']}")
+
                     for k, v in msg.items():
                         if isinstance(v, torch.Tensor):
                             msg[k] = v.to(self.device)
                     result = self.model.act_tcp(msg)
                     send_msg = self._build_send_message(msg, result)
-                    diffs = [send_msg['gripper_pose'][i] - msg['gripper_pose'].cpu().numpy().tolist()[i] for i in range(7)]
-                    logger.info(f"{log_prefix('Model', connection.addr)} | gripper_pose diff {diffs}")
                     
                     connection.send_queue.put(send_msg)
+
                     duration = time.time() - start_time
                     logger.info(f"{log_prefix('Model', connection.addr)} | finish frame {msg['frame_idx']} | Inference time: {duration:3f}s | \nSend pose: {send_msg['gripper_pose']}")
                 except queue.Empty:
@@ -224,8 +234,12 @@ class ARP_TCP_Client:
     ##region model utils
     def _build_send_message(self, msg, result):
         if self.debug_mode: return { "task": msg['task'], "frame_idx": msg['frame_idx'], "gripper_pose": [0.0]*7 }
+        
         pose = quaternion_pose_to_axis_angle(result.action[:7])
         pose_7d = np.concatenate([pose, [result.action[-2]]], 0).tolist()
+        diffs = [result.action[:7].tolist()[i] - msg['gripper_pose'].cpu().numpy().tolist()[i] for i in range(7)]
+        logger.info(f"{log_prefix('Model')} | gripper_pose diff {diffs}")
+
         return {
             "task": msg['task'],  
             "frame_idx": msg['frame_idx'],  
@@ -233,9 +247,11 @@ class ARP_TCP_Client:
         } 
     ##endregion
 
+# @configurable('./configs/act.yaml')
+# @configurable('./configs/rvt2.yaml')
 @configurable('./configs/arp_plus_tcp.yaml')
 def main(cfg:DictConfig):
-    client = ARP_TCP_Client(cfg, debug_mode=False, visualize_pc=True)
+    client = ARP_TCP_Client(cfg, debug_mode=False, visualize_pc=False)
     client.run_forever()
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@ py_module: autoregressive_policy_plus
 
 model:
   weights: null
-  # weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_1GPU/lr1.25e-05/Emb_moeTrue_Transformer_moeFalse/2025_07_14_36BS_10epochs/2025-07-14_16-26/model_30000.pth
   
   hp:
     # rot_z_weight_factor: 1
@@ -35,9 +34,9 @@ model:
     lang_len: 77
     norm_corr: true
     pe_fix: true
-    proprio_dim: 3 # 4 # 18
+    proprio_dim: 8 # 8 14 # origin_style_state为True时为3，否则去掉collision（1）、gripper_joint_positions（2）为14，去掉关节角（6）为8 # 18 # 基本可以定下来8，不需要关节角，如果加时间编码就是9
     mvt_cameras: ['top', 'left', 'front']
-    stage2_zoom_scale: 4
+    stage2_zoom_scale: 4 # 可以改动试试？
     stage2_waypoint_label_noise: 0.05
     rotation_aug: #null
       - [-2, -1, 0, -1, -2]
@@ -53,15 +52,16 @@ model:
 
     # lr should be thought on per sample basis
     # effective lr is multiplied by bs * num_devices
-    lr: 1.25e-5 # 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (cfg.train.num_gpus * cfg.train.bs),少GPU应对应增大lr
-    warmup_steps: 2000
+    lr: 0.75e-5 #2.5e-5 # 1.25e-5 # 1e-4 #before 1.25e-5 # 1e-4 # 在train的时候cfg.model.hp.lr *= (cfg.train.num_gpus * cfg.train.bs),少GPU应对应增大lr
+    warmup_steps: 2000 # before 2000
     optimizer_type: lamb
     lr_cos_dec: true
     add_rgc_loss: true
-    transform_augmentation: true
-    transform_augmentation_xyz: [0.125, 0.125, 0.125]
-    transform_augmentation_rpy: [0.0, 0.0, 45.0]
-    lambda_weight_l2: 1e-4 # 1e-6
+    # 这里加入扰动，以防止过拟合
+    transform_augmentation: true # true # false不大行
+    transform_augmentation_xyz: [0.02, 0.02, 0.02] #[0.125, 0.125, 0.125]
+    transform_augmentation_rpy: [0.0, 0.0, 45.0] #[0.0, 0.0, 45.0],怀疑应适当加大以避免过拟合，目前的bound太大的旋转会甩出去
+    lambda_weight_l2: 1e-4 #before 1e-4 # 1e-6
     num_rotation_classes: 72
 
     cos_dec_max_step: -1 # will be override during training
@@ -71,32 +71,34 @@ model:
     # arp_cfg: 
     #   TODO: true
 
-
 env:
-  tasks: piston_sleeve_installation # stack_cups, before all
+  tasks: rod_sleeve_assembly # piston_sleeve_installation,sleeve_fixturing,rod_sleeve_assembly #rod_sleeve_assembly #sleeve_fixturing # piston_sleeve_installation # stack_cups, before all
   cameras: ["front","left_shoulder", "right_shoulder", "overhead"]
-  scene_bounds: [-0.5, -0.5, -0.2, 0.5, 0.5, 0.5] # [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized,待确认
+  # scene_bounds: [-0.4, -0.5, -0.1, 0.05, 0.0, 0.4] #[-0.5, -0.5, 0, 0.5, 0.5, 0.5] # [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized,待确认
+  scene_bounds: [-0.4, -0.5, -0.1, 0.05, 0.0, 0.4] #[-0.4, -0.5, -0.1, 0.1, 0.1, 0.4] # [-0.4, -0.5, -0.25, 0.05, -0.1, 0.2] # Lower z bound since robot arm is raised 10cm above table [-0.4, -0.5, -0.2, 0.05, 0.0, 0.3]
   image_size: 512 #　TODO　有改动要记得修改
-  time_in_state: false
+  time_in_state: false #false # TODO　
   voxel_size: 100
-  episode_length: 25 # TODO 不对，encode time 相关
+  episode_length: 25 #25 # TODO 不对，encode time 相关;目前已经修改为直接使用len(episode['keypoints'])（当使用proprio且k2k时），后续再对齐
   rotation_resolution: 5
-  origin_style_state: true
+  origin_style_state: false #true # 为true时，只传当前帧的open进入模型，当前帧的pose和关节角都被丢弃了 
 
 train:
-  bs: 36 #48 #before 96 # 48
+  bs: 32 # 36 #48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 16 # 16 # before 100 # 16
-  num_gpus: 1 # 1 # before 4
+  epochs: 2 # 4 # 16 # before 100 # 16
+  num_gpus: 2 # 1 # before 4
   num_workers: 4 # before 8, need larger value
   num_transitions_per_epoch: 160000 # 80000 #before 160000 # iters=num_transitions_per_epoch*epochs/bs/world_size
   disp_freq: 100
   cached_dataset_path: null
-  save_freq: 2000 # before 10000
+  save_freq: 500 # 1000 # before 10000
   eval_mode: false
   k2k_sample_ratios: 
-    piston_sleeve_installation: 1.0
-  variation_path:  all_variations # variation0 # all_variations
+    piston_sleeve_installation: 1.0 #before 1.0 
+    sleeve_fixturing: 1.0 #1.0 # 尝试改为0.95，但测试中o2k并未展现出显著优势
+    rod_sleeve_assembly: 1.0
+  variation_path: all_variations # variation0 # all_variations
   episode_path: null # episode4 # null
 
 eval:
@@ -112,11 +114,11 @@ eval:
 
 hydra:
   job:
-    name: moe_${train.num_gpus}GPU #pick_green_var0 # test # default # arp_plus # eval.arp_plus
+    name: moe_${train.num_gpus}GPU_transform_augmentation${model.hp.transform_augmentation} #pick_green_var0 # test # default # arp_plus # eval.arp_plus
     chdir: false
   run:
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/${now:%Y_%m_%d}_${train.bs}BS_${train.epochs}epochs/${now:%Y-%m-%d_%H-%M} 
-    
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}_task_${env.tasks}/${now:%Y_%m_%d}_${train.bs}BS_${train.epochs}epochs/${now:%Y-%m-%d_%H-%M} 
+
 output_dir: ${hydra:run.dir} 
 
 wandb: 

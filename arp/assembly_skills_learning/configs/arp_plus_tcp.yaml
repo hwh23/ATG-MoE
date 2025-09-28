@@ -5,19 +5,9 @@ defaults:
 py_module: autoregressive_policy_plus
 
 model:
-  weights: outputs/moe_1GPU/lr1.25e-05/Emb_moeTrue_Transformer_moeFalse/2025_07_18_36BS_16epochs/2025-07-18_18-45/model_2000.pth
-
-
-env:
-  tasks: piston_sleeve_installation # stack_cups, before all
-  cameras: ["front","left_shoulder", "right_shoulder", "overhead"]
-  scene_bounds: [-0.5, -0.5, -0.2, 0.5, 0.5, 0.5] # [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized,待确认
-  image_size: 512
-  time_in_state: false
-  voxel_size: 100
-  episode_length: 25
-  rotation_resolution: 5
-  origin_style_state: true
+  # weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_2GPU_transform_augmentationTrue/lr7.5e-06/Emb_moeTrue_Transformer_moeFalse_task_rod_sleeve_assembly/2025_09_26_32BS_2epochs/2025-09-26_00-53/model_4500.pth
+  weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_2GPU_transform_augmentationTrue/lr7.5e-06/Emb_moeTrue_Transformer_moeFalse_task_sleeve_fixturing/2025_09_19_32BS_2epochs/2025-09-19_15-29/model_4500.pth
+  # weights: /opt/data/private/arp/arp/assembly_skills_learning/outputs/moe_2GPU_transform_augmentationTrue/lr7.5e-06/Emb_moeTrue_Transformer_moeFalse_proprio_dim8/2025_08_23_32BS_8epochs/2025-08-23_21-29/model_1000.pth
 
 train.num_gpus: 1
 # ================================================ #
@@ -27,7 +17,7 @@ hydra:
     name: tcp_moe
     chdir: false
   run:
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/2025_7.14_1tasks_${train.bs}BS_${train.epochs}epochs/${now:%Y-%m-%d_%H-%M} 
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/Emb_moe${model.hp.is_emb_moe}_Transformer_moe${model.hp.is_transformer_moe}/${now:%Y-%m-%d_%H-%M} 
     
 output_dir: ${hydra:run.dir} 
 
@@ -43,7 +33,7 @@ wandb:
 
 swanlab:
   project: ATG_MoE
-  use_swanlab: true
+  use_swanlab: false
 
 tcp:
   host: 127.0.0.1

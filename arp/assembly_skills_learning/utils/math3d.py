@@ -26,6 +26,8 @@ def normalize_quaternion(quat):
     return np.array(quat) / np.linalg.norm(quat, axis=-1, keepdims=True)
 
 def quaternion_to_discrete_euler(quaternion, resolution):
+    if isinstance(quaternion, torch.Tensor):
+        quaternion = quaternion.detach().cpu().numpy()
     euler = Rotation.from_quat(quaternion).as_euler('xyz', degrees=True) + 180
     assert np.min(euler) >= 0 and np.max(euler) <= 360
     disc = np.around((euler / resolution)).astype(int)

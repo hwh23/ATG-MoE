@@ -16,8 +16,31 @@ import os
 import torch
 import open3d as o3d
 from .logging_config import get_logger
+import copy 
 
 logger = get_logger(__name__, False)
+
+# # train走这个
+# def get_reasonable_low_dim_state(essential_obs): # dim=17
+#     return np.array([
+#             essential_obs.gripper_open,
+#             # essential_obs.ignore_collisions, #暂时去除这个维度
+#             *essential_obs.gripper_joint_positions,# gripper_joint_positions也丢掉；加上，强化对open状态的学习，降低相近pose对k2k的影响
+#             # # joint 也不加
+#             # *essential_obs.joint_positions #,
+#             *essential_obs.gripper_pose
+#         ]).astype(np.float32) # 17
+
+def get_reasonable_low_dim_state(essential_obs):
+    scale_open = 1.0   # gripper_open 权重放大，数值放大未见明显效果
+    scale_gripper_positions = 1.0  # joint_positions 权重放大
+    repeat_open =1 # 维度放大
+
+    return np.array([
+        *np.array([essential_obs.gripper_open * scale_open] * repeat_open, dtype=np.float32),
+        # *(scale_gripper_positions * np.array(essential_obs.gripper_joint_positions, dtype=np.float32)),
+        *essential_obs.gripper_pose
+    ], dtype=np.float32)
 
 ##region process utils
 def get_gripper_joint_positions(obs:dict):
@@ -31,27 +54,51 @@ def get_gripper_joint_positions(obs:dict):
         gripper_joint_positions = [0.0, 0.0]
     return np.array(gripper_joint_positions, dtype=np.float32)  # 2
 
-def get_reasonable_low_dim_state(obs:dict): # dim=18
+def get_reasonable_low_dim_state_tcp(obs:dict): # dim=18
+    scale_open = 1.0   # gripper_open 权重放大，未见明显效果
+    scale_gripper_positions = 1.0  # joint_positions 权重放大
+    repeat_open =1
+
     low_dim_state = []
     if obs.get('gripper_open') is not None:
-        low_dim_state.append(float(obs['gripper_open'] > 0.5))  # 1
-    if obs.get('ignore_collisions') is not None:
-        low_dim_state.append(obs['ignore_collisions'])
-    if obs.get('gripper_joint_positions') is not None:
-        low_dim_state.extend(obs['gripper_joint_positions'])  # 2
-    if obs.get('joint_positions') is not None:
-        low_dim_state.extend(obs['joint_positions'])
-    if obs.get('gripper_pose') is not None:
+        # low_dim_state.append(float(obs['gripper_open'] > 0.1))  # 1 # before 0.5, bug with 0.1
+        # low_dim_state.append([obs['gripper_open']* scale_open]* repeat_open)  # 已经是正确形式了
+        low_dim_state.extend([obs['gripper_open']* scale_open]* repeat_open)  # 已经是正确形式了
+
+    # if obs.get('ignore_collisions') is not None:              
+    #     low_dim_state.append(obs['ignore_collisions'])        # 1
+
+    # if obs.get('gripper_joint_positions') is not None:            
+    #     low_dim_state.extend([obs['gripper_joint_positions']* scale_gripper_positions])  # 2
+    # else:
+    #     assert obs.get('gripper_open') is not None, "obs must contain 'gripper_open' or 'gripper_joint_positions'"
+    #     gripper_open_factor = 0.04 * scale_gripper_positions
+    #     gripper_joint_positions = [obs['gripper_open'] * gripper_open_factor] * 2
+    #     low_dim_state.extend(gripper_joint_positions)  # 2
+    
+    # if obs.get('joint_positions') is not None:
+    #     low_dim_state.extend(obs['joint_positions'])            # 6
+    if obs.get('gripper_pose') is not None:                     # 7
         low_dim_state.extend(obs['gripper_pose'])
     return np.array(low_dim_state, dtype=np.float32) # 18
 
-def get_low_dim_state(origin_style_state, obs:dict):
+def get_low_dim_state(origin_style_state, obs:dict, include_time_in_state:bool=False,episode_length=8):
     if origin_style_state:
-        curr_low_dim_state = np.array([float(obs['gripper_open'] > 0.5) ,
+        curr_low_dim_state = np.array([obs['gripper_open'] ,# 0.5，[float(obs['gripper_open'] > 0.1) ,
                                         *get_gripper_joint_positions(obs)
                                         ])
     else:
-        curr_low_dim_state = get_reasonable_low_dim_state(obs)
+        curr_low_dim_state = get_reasonable_low_dim_state_tcp(obs)
+    if include_time_in_state:
+        # TODO 测试时更好的处理方式
+        if obs['frame_idx'] < episode_length:
+            kp = obs['frame_idx']
+        else:
+            kp = obs['frame_idx'] % episode_length
+        curr_low_dim_state = np.concatenate(
+            [curr_low_dim_state,
+            [encode_time(kp, episode_length=episode_length)]] #episode_length 不再写死，不对，还是得写死，否则测试时怎么处理
+        ).astype(np.float32)
     return torch.tensor(curr_low_dim_state, dtype=torch.float32).to('cpu')
 
 def get_lang_emb(obs, add_lang:bool, debug_mode, clip_model, device):
@@ -120,7 +167,7 @@ def append_rgbd_pc_to_obs(msg:dict, obs:dict, visualize:bool=False)->None:
             cur_view['depth'] = cur_view['depth'].squeeze(0)
             
         # Image processing: output RGB at shape [(bsz)1, (channel)3, H, W]; D at shape [H, W]； pc at shape [B,C,H,W]
-        rgb = cur_view['rgb']
+        rgb = copy.deepcopy(cur_view['rgb'])
         logger.debug(f'[Process] {camera}_rgb shape: {rgb.shape}')
         
         # Denormalize depth before getting the actual depth metres
@@ -129,7 +176,7 @@ def append_rgbd_pc_to_obs(msg:dict, obs:dict, visualize:bool=False)->None:
         logger.info(f'[Process] {camera} intrinsic: {np.array(msg["misc"][camera]["intrinsics"])}')
         T_cw_cv, T_cv_cr = unity_extvec_to_extrinsics(np.array(msg['misc'][camera]['extrinsics']))
                                                                               
-        point_cloud_np = pointcloud_from_depth_and_camera_params( # it takes depth at shape (H,W)
+        point_cloud_np = pointcloud_from_depth_and_camera_params_axial_distance( # it takes depth at shape (H,W)
                                                                 np.array(depth_np),
                                                                 T_cw_cv,
                                                                 np.array(
@@ -143,6 +190,7 @@ def append_rgbd_pc_to_obs(msg:dict, obs:dict, visualize:bool=False)->None:
                                                             camera=camera, save_dir='data/train/visualize_pc_tcp/world')
         
         if visualize: save_depth_to_exr(depth_map=depth_np, path=f'data/train/visualize_pc_tcp/{camera}_depth.exr')
+        if visualize: save_rgb_to_png(image=rgb, path_pattern=f'data/train/visualize_pc_tcp/{camera}_rgb.png')
         
         point_cloud = torch.tensor(point_cloud_np, dtype=torch.float32).unsqueeze(0).permute(0,3,1,2).to('cpu') # turn point cloud to shape [B,C,H,W]
         logger.debug(f'[Process] {camera}_pointcloud shape: {point_cloud.shape}')
@@ -154,6 +202,57 @@ def append_rgbd_pc_to_obs(msg:dict, obs:dict, visualize:bool=False)->None:
         obs[f'{camera}_depth'] = depth
         obs[f'{camera}_point_cloud'] = point_cloud
 ##endregion
+
+def save_rgb_to_png(image, path_pattern):
+    """
+    Save a batch of RGB images to PNG format.
+
+    支持 torch.Tensor 或 numpy.ndarray，形状 (B,3,H,W)，数值可以是：
+      - uint8，假定范围 0–255
+      - float，假定范围 0–1 或 0–255（自动判断）
+
+    Args:
+        image: torch.Tensor or numpy array of shape (B, 3, H, W)
+        path_pattern: 如 "output/frame_{:03d}.png"，必须包含一个索引占位符
+    """
+    # Tensor → numpy
+    if isinstance(image, torch.Tensor):
+        image = image.detach().cpu().numpy()
+
+    if not isinstance(image, np.ndarray):
+        raise TypeError(f"Unsupported image type: {type(image)}")
+
+    B, C, H, W = image.shape
+    if C != 3:
+        raise ValueError(f"Expected 3 channels, got {C}")
+
+    # 确保输出目录存在
+    out_dir = os.path.dirname(path_pattern)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    for b in range(B):
+        img = image[b]
+
+        # 如果不是 uint8，就转换
+        if img.dtype != np.uint8:
+            # 先取绝对最大值来判断量级
+            vmin, vmax = float(img.min()), float(img.max())
+            if vmax > 1.0:
+                # 当作 0–255 范围
+                img = np.clip(img, 0.0, 255.0)
+            else:
+                # 当作 0–1 范围
+                img = np.clip(img, 0.0, 1.0) * 255.0
+            img = np.round(img).astype(np.uint8)
+
+        # CHW → HWC
+        img = img.transpose(1, 2, 0)
+
+        # 保存
+        im = Image.fromarray(img, mode='RGB')
+        filename = path_pattern.format(b)
+        im.save(filename, 'PNG')
 
 def save_depth_to_exr(depth_map, path):
     # depth_map: H x W, float32 numpy array
@@ -392,7 +491,7 @@ def unity_extvec_to_extrinsics(ext_vec: np.ndarray,cam_to_world: bool = True):
         — Unity 用左手系 (Y-up, Z→里)
     返回:
       T_cw_cv: (4×4) Camera→OpenCV-World 外参，
-                用于 pointcloud_from_depth_and_camera_params
+                用于 pointcloud_from_depth_and_camera_params_axial_distance
       T_cv_r:  (4×4) OpenCV-World → Robot-Base 坐标映射，
                 用于将上述 world_pc 转到机械臂坐标系下
     """
@@ -476,7 +575,7 @@ def transform_pointcloud_world_to_robot(
     return robot_pc
 
 # 写个新的，代替VisionSensor.pointcloud_from_depth_and_camera_params
-def pointcloud_from_depth_and_camera_params(depth: np.ndarray,
+def pointcloud_from_depth_and_camera_params_axial_distance(depth: np.ndarray,
                                             extrinsics: np.ndarray,
                                             intrinsics: np.ndarray
                                             ) -> np.ndarray:
@@ -521,7 +620,7 @@ def pointcloud_from_depth_and_camera_params(depth: np.ndarray,
     pc_cam= pts_cam.T.reshape(H, W, 3)  # (H, W, 3)
     return pc_w
 
-# # 如果深度不是光轴深度而是欧式距离，用这个函数处理
+# # 如果深度不是光轴深度而是欧式距离，用这个函数处理，目前训练时需要使用这个函数
 def pointcloud_from_depth_and_camera_params_euclidean_distance(depth: np.ndarray,
                                             extrinsics: np.ndarray,
                                             intrinsics: np.ndarray) -> np.ndarray:
@@ -540,8 +639,11 @@ def pointcloud_from_depth_and_camera_params_euclidean_distance(depth: np.ndarray
 
     H, W = depth.shape
     # 1) 像素坐标 u,v
-    us = (np.arange(W) + 0.5)[None, :].repeat(H, 0)  # 半像素中心
-    vs = (np.arange(H) + 0.5)[:, None].repeat(W, 1)
+    # us = (np.arange(W) + 0.5)[None, :].repeat(H, 0)  # 半像素中心
+    # vs = (np.arange(H) + 0.5)[:, None].repeat(W, 1)
+    # TODO: 这里的像素坐标是半像素中心还是左上角？如果是左上角，us和vs需要+0.5
+    us = (np.arange(W))[None, :].repeat(H, 0)  # 半像素中心
+    vs = (np.arange(H))[:, None].repeat(W, 1)
     pix = np.stack((us, vs, np.ones_like(us)), axis=0).reshape(3, -1)
 
     # 2) 反投影方向向量
@@ -565,7 +667,7 @@ def pointcloud_from_depth_and_camera_params_euclidean_distance(depth: np.ndarray
     return pts_w.T.reshape(H, W, 3)
 
 
-def retreive_full_observation(cameras, essential_obs, episode_path, i, load_mask=False, skip_rgb=False):
+def retreive_full_observation(cameras, essential_obs, episode_path, i, load_mask=False, skip_rgb=False, distance_type:str='euclidean'):
     
     IMAGE_RGB = 'rgb'
     IMAGE_DEPTH = 'depth'
@@ -590,10 +692,17 @@ def retreive_full_observation(cameras, essential_obs, episode_path, i, load_mask
         # obs[f'{camera}_depth'] = near + obs[f'{camera}_depth'] * (far - near)
         # ============
         T_cw_cv, T_cv_cr = unity_extvec_to_extrinsics(np.array(essential_obs.misc[f'{camera}_camera_extrinsics']))
-        obs[f'{camera}_point_cloud'] = pointcloud_from_depth_and_camera_params_euclidean_distance(obs[f'{camera}_depth'],
-                                                                                            T_cw_cv,
-                                                                                            np.array(essential_obs.misc[f'{camera}_camera_intrinsics']).reshape(3,3)
-                                                                                            )
+        if distance_type == 'euclidean':
+            obs[f'{camera}_point_cloud'] = pointcloud_from_depth_and_camera_params_euclidean_distance(obs[f'{camera}_depth'],
+                                                                                                T_cw_cv,
+                                                                                                np.array(essential_obs.misc[f'{camera}_camera_intrinsics']).reshape(3,3)
+                                                                                                )     
+        else:   # axial distance                                                                      
+            obs[f'{camera}_point_cloud'] = pointcloud_from_depth_and_camera_params_axial_distance( # it takes depth at shape (H,W)
+                                                                    obs[f'{camera}_depth'],
+                                                                    T_cw_cv,
+                                                                    np.array(essential_obs.misc[f'{camera}_camera_intrinsics']).reshape(3,3)
+                            )
         obs[f'{camera}_point_cloud'] = transform_pointcloud_world_to_robot(obs[f'{camera}_point_cloud'], T_cv_cr) 
     return obs
 
@@ -765,26 +874,155 @@ def _is_stopped(demo, i, obs, stopped_buffer, delta=0.1):
     return stopped
 """
 
-def keypoint_discovery(demo: Demo, stopping_delta: float=0.1, stop_buffer_max = 4) -> List[int]:
+# def keypoint_discovery(demo: Demo, stopping_delta: float=0.1, stop_buffer_max = 4) -> List[int]:
+#     """基于停止状态和夹爪状态变化的关键帧检测"""
+#     episode_keypoints = []
+#     # prev_gripper_status = get_gripper_status(demo[0].gripper_open)
+#     prev_gripper_status = demo[0].gripper_open
+#     stopped_buffer = 0
+#     for i, obs in enumerate(demo):
+#         # stopped = _is_stopped(demo, i, obs, stopped_buffer, stopping_delta)
+#         stopped = _is_stopped(demo, i, stopped_buffer) # check if the gripper is stationary
+#         stopped_buffer = stop_buffer_max if stopped else stopped_buffer - 1
+#         # If change in gripper, or end of episode.
+#         last = i == (len(demo) - 1)
+#         # current_gripper_status = get_gripper_status(obs.gripper_open)
+#         current_gripper_status = obs.gripper_open
+#         if i != 0 and (current_gripper_status != prev_gripper_status or
+#                         last or stopped):
+#             episode_keypoints.append(i)
+#         prev_gripper_status = current_gripper_status
+#     if len(episode_keypoints) > 1 and (episode_keypoints[-1] - 1) == \
+#             episode_keypoints[-2]:
+#         episode_keypoints.pop(-2)
+#     return episode_keypoints
+
+
+# def keypoint_discovery(demo: Demo, stopping_delta: float = 0.1, stop_buffer_max: int = 4, min_gap: int = 8) -> List[int]:
+#     """基于停止状态和夹爪状态变化的关键帧检测,添加两帧之间的最小间隔过滤"""
+#     episode_keypoints = []
+#     prev_gripper_status = demo[0].gripper_open
+#     stopped_buffer = 0
+
+#     for i, obs in enumerate(demo):
+#         stopped = _is_stopped(demo, i, stopped_buffer)
+#         stopped_buffer = stop_buffer_max if stopped else max(stopped_buffer - 1, 0)
+#         last = i == (len(demo) - 1)
+#         current_gripper_status = obs.gripper_open
+
+#         # 原始的关键帧判定逻辑
+#         if i != 0 and (current_gripper_status != prev_gripper_status or last or stopped):
+#             # 新增：最小间隔过滤
+#             if not episode_keypoints or (i - episode_keypoints[-1]) > min_gap:
+#                 episode_keypoints.append(i)
+
+#         prev_gripper_status = current_gripper_status
+
+#     return episode_keypoints
+
+def keypoints_part(demo: Demo) -> List[int]:
+    """当直接给定关键帧时，只保留中间的关键帧"""
     episode_keypoints = []
-    # prev_gripper_status = get_gripper_status(demo[0].gripper_open)
-    prev_gripper_status = demo[0].gripper_open
-    stopped_buffer = 0
+
     for i, obs in enumerate(demo):
-        # stopped = _is_stopped(demo, i, obs, stopped_buffer, stopping_delta)
-        stopped = _is_stopped(demo, i, stopped_buffer) # check if the gripper is stationary
-        stopped_buffer = stop_buffer_max if stopped else stopped_buffer - 1
-        # If change in gripper, or end of episode.
-        last = i == (len(demo) - 1)
-        # current_gripper_status = get_gripper_status(obs.gripper_open)
-        current_gripper_status = obs.gripper_open
-        if i != 0 and (current_gripper_status != prev_gripper_status or
-                        last or stopped):
+        if i != 0 and i != 1 and i != (len(demo) - 1):
             episode_keypoints.append(i)
-        prev_gripper_status = current_gripper_status
-    if len(episode_keypoints) > 1 and (episode_keypoints[-1] - 1) == \
-            episode_keypoints[-2]:
-        episode_keypoints.pop(-2)
+
+    return episode_keypoints
+
+def keypoint_discovery(demo: Demo, stopping_delta: float = 0.1, stop_buffer_max: int = 4, min_gap: int = 0, 
+                       max_delta_height_grasp = 0.117, max_delta_dist_grasp: float = 0.025, ) -> List[int]:
+    """discover 4 keyposes: grasp, post-grasp hover, pre-place hover, place
+    hover detection based on distance and height change (dz) thresholds where dz has higher priority"""
+    episode_keypoints = []    
+
+    # --- 1. Gripper change frames (grasp + place anchors) ---   
+    grasp_idx = None
+    place_idx = None
+    for i in range(1, len(demo)):
+        if grasp_idx is None and demo[i-1].gripper_open == 0 and demo[i].gripper_open == 1:
+            grasp_idx = i
+            episode_keypoints.append(i)
+        if place_idx is None and demo[i-1].gripper_open == 1 and demo[i].gripper_open == 0:
+            place_idx = i
+            episode_keypoints.append(i)
+        if grasp_idx is not None and place_idx is not None:
+            break
+    assert grasp_idx is not None, "No grasp frame found"
+    assert place_idx is not None, "No place frame found"
+    
+    grasp_idx = episode_keypoints[0]
+    place_idx = episode_keypoints[-1]
+    hover_after = None
+    hover_before = None
+    grasp_pose = np.array(demo[grasp_idx].gripper_pose[:3])
+    place_pose = np.array(demo[place_idx].gripper_pose[:3])
+    dz_grasp_place = place_pose[2] - grasp_pose[2]
+    
+    
+    max_delta_dist_grasp = min(max_delta_dist_grasp, np.linalg.norm(place_pose - grasp_pose)/2) # make sure hover detection distance threshold is not larger than half of the distance between grasp and place
+    max_delta_height_grasp = max(max_delta_height_grasp, abs(dz_grasp_place)+0.01) # make sure height threshold is not smaller than the height difference between grasp and place + a small margin
+    # Minus the height difference between grasp and place to avoid stopping too close to the other anchor
+    max_delta_dist_place = max_delta_dist_grasp
+    max_delta_height_place = max_delta_height_grasp - dz_grasp_place
+    max_delta_dist = np.linalg.norm(place_pose - grasp_pose)/2
+    
+    # --- 2. Post-grasp hover (forward search) ---
+    # Search for frame based on height change first
+    for j in range(grasp_idx+1, place_idx):
+        pose_j = np.array(demo[j].gripper_pose[:3])
+        dz = abs(pose_j[2] - grasp_pose[2])
+        if np.linalg.norm(pose_j - place_pose) < max_delta_dist: # if already close to place, stop searching
+            break # we dont want to be too close to place
+        if dz > max_delta_height_grasp: 
+            hover_after = j
+            logger.info(f'[{"Post-Grasp":<10}] Found hover at {hover_after:>3}, dz: {dz:.4f}, norm: {np.linalg.norm(pose_j - grasp_pose):.4f}')
+            break
+    # fallback to distance
+    if hover_after is None:  
+        logger.info(f"[{'Post-Grasp':<10}] No hover found based on height change {max_delta_height_grasp}, fallback to distance-based detection.")
+        for j in range(grasp_idx+1, place_idx):
+            pose_j = np.array(demo[j].gripper_pose[:3])
+            dist = np.linalg.norm(pose_j - grasp_pose)
+            dz = abs(pose_j[2] - grasp_pose[2])
+            if dist > max_delta_dist_grasp:
+                hover_after = j
+                logger.info(f'[{"Post-Grasp":<10}] found post-grasp at {hover_after:>3}, dz: {dz:.4f}, dist: {dist:.4f}')
+                break
+    # Insert if found
+    if hover_after:
+        episode_keypoints.insert(1, hover_after)
+    else:
+        raise(RuntimeError(f"[{'Post-Grasp':<10}] No hover frame found, try with different thresholds for placing hover detection."))
+
+    # --- 3. Pre-place hover (backward search) ---
+    # Search for frame based on height change first
+    for j in range(place_idx-1, grasp_idx, -1):
+        pose_j = np.array(demo[j].gripper_pose[:3])
+        dz = abs(pose_j[2] - place_pose[2]) 
+        if  np.linalg.norm(pose_j - grasp_pose) < max_delta_dist: # if already close to grasp, stop searching
+            break # we dont want to be too close to grasp
+        if dz > max_delta_height_place:     # priority on height
+            hover_before = j
+            logger.info(f'[{"Pre-Place":<10}] Found hover at {hover_before:>3}, dz: {dz:.4f}, dist: {np.linalg.norm(pose_j - place_pose):.4f}')
+            break
+    # fallback to distance
+    if hover_before is None:  
+        logger.info(f"[{'Pre-Place':<10}] No hover found based on height change {max_delta_height_place}, fallback to distance-based detection.")
+        for j in range(place_idx-1, grasp_idx, -1):
+            pose_j = np.array(demo[j].gripper_pose[:3])
+            dist = np.linalg.norm(pose_j - place_pose) - dz_grasp_place if dz_grasp_place < 0 else np.linalg.norm(pose_j - place_pose)
+            dz = abs(pose_j[2] - place_pose[2])
+            if dist > max_delta_dist_place:
+                hover_before = j
+                logger.info(f'[{"Pre-Place":<10}] Found hover at {hover_before:>3}, dz: {dz:.4f}, dist: {dist:.4f}')
+                break
+    # Insert if found
+    if hover_before:
+        episode_keypoints.insert(-1, hover_before)
+    else:
+        raise(RuntimeError(f"[{'Pre-Place':<10}] No hover frame found, try with different thresholds for placing hover detection."))
+    logger.debug(episode_keypoints)
     return episode_keypoints
 
 
@@ -797,18 +1035,8 @@ def query_next_kf(f, kfs, return_index=False):
                 return kf
     raise RuntimeError("No more keyframes")
 
-
-def get_reasonable_low_dim_state(essential_obs): # dim=18
-    return np.array([
-            essential_obs.gripper_open,
-            essential_obs.ignore_collisions,
-            *essential_obs.gripper_joint_positions,
-            *essential_obs.joint_positions,
-            *essential_obs.gripper_pose
-        ]).astype(np.float32) # 18
-
 # 点云可视化
-def save_combined_pointcloud_and_gripper(sample_dict, camera, save_dir, axis_sampling_steps=50):
+def save_combined_pointcloud_and_gripper(sample_dict, gripper_pose_now ,camera, save_dir, axis_sampling_steps=50):
     """
     将点云和 gripper 坐标系一起保存到一个 PLY 文件（点形式）：
       - {save_dir}/{camera}_combined.ply
@@ -827,7 +1055,7 @@ def save_combined_pointcloud_and_gripper(sample_dict, camera, save_dir, axis_sam
     pc_colors = np.tile(np.array([0.5, 0.5, 0.5]), (pts.shape[0], 1))
 
     # 2) 构造 gripper 坐标系轴线上的离散采样点及颜色
-    gp = sample_dict['gripper_pose']  # [tx, ty, tz, qx, qy, qz, qw]
+    gp = gripper_pose_now  # [tx, ty, tz, qx, qy, qz, qw]
     t = gp[:3]
     x, y, z, w = gp[3:]
     # 四元数 -> 旋转矩阵

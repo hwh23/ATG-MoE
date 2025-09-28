@@ -13,6 +13,56 @@ from pytorch3d import transforms as torch3d_tf
 from scipy.spatial.transform import Rotation
 import utils.math3d as math3d
 
+import matplotlib.pyplot as plt
+
+def save_smooth_spatial_label(smooth: torch.Tensor, height: int, width: int, out_path: str):
+    """
+    将 smooth_spatial_label（shape [bs, H*W, C]）中的第一个 batch 的热图保存为 PNG。
+    
+    参数：
+        smooth (torch.Tensor): 大小为 [bs, H*W, C] 的热图张量
+        height (int): 重塑后的图像高度 H
+        width (int): 重塑后的图像宽度 W
+        out_path (str): 输出 PNG 文件路径，例如 "heatmap.png"
+    """
+    # 取第一个 batch，重塑为 [H, W, C]
+    heatmaps = smooth[0].view(height, width, -1).cpu().detach().numpy()
+    num_cameras = heatmaps.shape[-1]
+    
+    # 创建一行多个子图，每个子图展示一个 camera 的热图
+    fig, axes = plt.subplots(1, num_cameras, figsize=(4 * num_cameras, 4))
+    if num_cameras == 1:
+        axes = [axes]
+    for i, ax in enumerate(axes):
+        ax.imshow(heatmaps[:, :, i])
+        ax.set_title(f'Camera {i}')
+        ax.axis('off')
+    
+    plt.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+# 示例调用：
+# 假设 smooth_spatial_label_stage1 是你的张量，大小为 [36, 50176, 3]，对应 36 batch，3 cameras，224x224
+# save_smooth_spatial_label(smooth_spatial_label_stage1, 224, 224, 'smooth_heatmap.png')
+
+def save_rendered_images(img: torch.Tensor, out_dir: str):
+    # 取第一个 batch，转到 H×W×C 并转回 cpu／numpy,img.shape:[B,V,C,H,W]
+    import cv2, os
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 取第一个 batch
+    for view_id in range(img.shape[1]):  # 3 个视角
+        vis = img[0, view_id]             # [C, H, W]
+        vis = vis.permute(1, 2, 0)        # -> [H, W, C]
+        if vis.shape[2] > 3:
+            vis = vis[..., 3:6]
+
+        cv2.imwrite(
+            os.path.join(out_dir, f"mvt1_render_view{view_id}.png"),
+            (vis.cpu().numpy() * 255).astype(np.uint8)[..., ::-1]  # RGB->BGR
+        )
 
 def denorm_rgb(x):
     v = (x + 1) / 2 * 255.0

@@ -9,6 +9,7 @@ import numpy as np
 import os
 import json
 import logging
+import re
 from rlbench.demo import Demo
 import pickle
 from PIL import Image
@@ -37,7 +38,9 @@ class TransitionDataset(Dataset):
                 episode_length=25, time_in_state=False, k2k_sample_ratios={}, o2k_window_size=10,
                 variation_path:str='all_variations',
                 episode_path:str=None,
-                shuffle:bool=False):
+                shuffle:bool=False,
+                overwrite_keypose:bool=False,
+                using_all_keypose:bool=True,):
         super().__init__()
         self._num_batches = batch_num
         self._batch_size = batch_size
@@ -48,7 +51,8 @@ class TransitionDataset(Dataset):
         # 很奇怪，这两个bool没看到有什么必然联系
         # if not origin_style_state:
         #     assert not time_in_state, "should not include a discrete timestep in state"
-
+        self.overwrite_keypose = overwrite_keypose
+        self.using_all_keypose = using_all_keypose
         self.episode_length = episode_length
         self.root = root
         self.k2k_sample_ratios = k2k_sample_ratios
@@ -74,9 +78,10 @@ class TransitionDataset(Dataset):
                     episodes = [episode_path]
                 else:
                     episodes = os.listdir(episodes_path)
+                episodes = sorted(episodes, key=lambda x: int(re.search(r'\d+', x).group()))
                 if task not in self.data: self.data[task] = {}
                 for episode in tqdm(episodes, desc="episodes", leave=False):
-                    if 'episode' not in episode:
+                    if 'episode' not in episode: # bypass non-episode folders and files
                         continue
                     else:
                         if episode not in self.data[task]: self.data[task][episode] = dict(keypoints=[], lang_emb=None, obs=None)
@@ -150,18 +155,39 @@ class TransitionDataset(Dataset):
         self.data[task][episode]['obs'] = obs
             
     def load_keypoints(self, ep, task, episode):
-        try: 
-            with open(osp.join(ep, KEYPOINT_JSON)) as f:
-                self.data[task][episode]['keypoints'] = json.load(f)
-        except FileNotFoundError:
-            logging.info(f"Keypoint file not found for {task} episode {episode}, generating keypoints.")
-            kp:List = keypoint_discovery(self.data[task][episode]['obs'], 
-                                         stopping_delta=0.1, 
-                                         stop_buffer_max=20)
+        if self.overwrite_keypose == False:
+            try: 
+                with open(osp.join(ep, KEYPOINT_JSON)) as f:
+                    self.data[task][episode]['keypoints'] = json.load(f)
+            except FileNotFoundError:
+                logging.info(f"Keypoint file not found for {task} episode {episode}, generating keypoints.")
+                if self.using_all_keypose:
+                    kp:List = keypoints_part(self.data[task][episode]['obs'])
+                else:
+                    kp:List = keypoint_discovery(self.data[task][episode]['obs'], 
+                                                        stopping_delta=0.1, 
+                                                        stop_buffer_max=20,
+                                                        max_delta_height_grasp = 0.05, 
+                                                        max_delta_dist_grasp = 0.025)
+                    
+                self.data[task][episode]['keypoints'] = kp
+                with open(osp.join(ep, KEYPOINT_JSON), 'w') as f:
+                    json.dump(kp, f)
+        else:
+            logger.info(f"[{task}][{episode}] Overwrite keypoints.")
+            if self.using_all_keypose:
+                kp:List = keypoints_part(self.data[task][episode]['obs'])
+            else:
+                kp:List = keypoint_discovery(self.data[task][episode]['obs'], 
+                                                    stopping_delta=0.1, 
+                                                    stop_buffer_max=20,
+                                                    max_delta_height_grasp = 0.05, 
+                                                    max_delta_dist_grasp = 0.025)
+                
             self.data[task][episode]['keypoints'] = kp
             with open(osp.join(ep, KEYPOINT_JSON), 'w') as f:
                 json.dump(kp, f)
-    
+            
     @torch.no_grad()
     def load_lang_goal_emb(self, ep, task, episode, model, device):
         try:
@@ -213,7 +239,7 @@ class TransitionDataset(Dataset):
             variation_id = episode['obs'].variation_number
             essential_obs = episode['obs'][obs_frame_id]
             essential_kp_obs = episode['obs'][kp_frame_id]
-            obs_media_dict = retreive_full_observation(self.cameras, essential_obs, episode_path, obs_frame_id)
+            obs_media_dict = retreive_full_observation(self.cameras, essential_obs, episode_path, obs_frame_id, distance_type='euclidean')
 
             # 测试点云范围
             # print_pointcloud_xyz_ranges(obs_media_dict,self.cameras)
@@ -281,31 +307,6 @@ class TransitionDataset(Dataset):
             pin_memory_device = f'cuda:{pin_memory_device}'
         return DataLoader(self, batch_size=None, shuffle=False, pin_memory=pin_memory,
                         sampler=sampler, num_workers=num_workers, pin_memory_device=pin_memory_device), sampler
-
-if __name__ == "__main__":
-    only_key_frames_ratios = {
-      "place_cups": 1,
-      "stack_cups": 1,
-      "close_jar": 1,
-      "push_buttons": 1,
-      "meat_off_grill": 1,
-      "stack_blocks": 1,
-      "reach_and_drag": 1,
-      "slide_block_to_color_target": 1,
-      "place_shape_in_shape_sorter": 1,
-      "open_drawer": 1,
-      "sweep_to_dustpan_of_size": 1,
-      "put_groceries_in_cupboard": 1,
-      "light_bulb_in": 1,
-      "turn_tap": 1,
-      "insert_onto_square_peg": 1,
-      "put_item_in_drawer": 1,
-      "put_money_in_safe": 1,
-      "place_wine_at_rack_location": 1
-    }
-    D = TransitionDataset("./data/train", ["open_drawer"],
-                          origin_style_state=True, time_in_state=False, k2k_sample_ratios=only_key_frames_ratios)
-    D[0]
 
 
 class Assembly_Observation(Observation):
@@ -382,4 +383,35 @@ class Assembly_Observation(Observation):
             ignore_collisions = ignore_collisions,
             misc = misc,
         )
-        
+
+# if __name__ == "__main__":
+#     only_key_frames_ratios = {
+#       "place_cups": 1,
+#       "stack_cups": 1,
+#       "close_jar": 1,
+#       "push_buttons": 1,
+#       "meat_off_grill": 1,
+#       "stack_blocks": 1,
+#       "reach_and_drag": 1,
+#       "slide_block_to_color_target": 1,
+#       "place_shape_in_shape_sorter": 1,
+#       "open_drawer": 1,
+#       "sweep_to_dustpan_of_size": 1,
+#       "put_groceries_in_cupboard": 1,
+#       "light_bulb_in": 1,
+#       "turn_tap": 1,
+#       "insert_onto_square_peg": 1,
+#       "put_item_in_drawer": 1,
+#       "put_money_in_safe": 1,
+#       "place_wine_at_rack_location": 1
+#     }
+#     D = TransitionDataset("./data/train", ["open_drawer"],
+#                           origin_style_state=True, time_in_state=False, k2k_sample_ratios=only_key_frames_ratios)
+#     D[0]
+
+if __name__ == "__main__":
+    dataset = TransitionDataset(root='/opt/data/private/arp/arp/assembly_skills_learning/data/train', 
+                                tasks=['sleeve_fixturing'],
+                                # tasks=['rod_sleeve_assembly'],
+                                # tasks=['rod_sleeve_assembly','sleeve_fixturing'],
+                                overwrite_keypose=True)

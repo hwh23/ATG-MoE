@@ -25,7 +25,7 @@ from PIL import Image
 from preprocess import CubePointCloudRenderer, preprocess_images_in_batch, \
     flatten_img_pc_to_points, clamp_pc_in_bound, place_pc_in_cube, generate_heatmap_from_screen_pts, \
     apply_se3_augmentation, transform_pc, grid_sample_from_heatmap, add_uniform_noise, denorm_rgb
-
+import math
 
 from utils.layers import (
     Conv2DBlock,
@@ -334,6 +334,13 @@ class PolicyNetwork(nn.Module):
         # then use xyz feature as a condition, to produce each xyz for stage 2
         # then produce rot and grip separately
 
+        #region parse moe properties
+        self.is_transformer_moe = model_cfg.is_transformer_moe if hasattr(model_cfg, "is_transformer_moe") else False
+        self.is_emb_moe = model_cfg.is_emb_moe if hasattr(model_cfg, "is_emb_moe") else False
+        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_transformer_moe") and hasattr(model_cfg, "is_emb_moe") else None
+        self.moe_multiple_gate = model_cfg.moe_multiple_gate if hasattr(model_cfg, "moe_multiple_gate") else False
+        self.moe_cfg = model_cfg.moe if hasattr(model_cfg, "moe") else None
+
         arp_cfg = ModelConfig(
             n_embd=128,
             embd_pdrop = 0.1, 
@@ -362,13 +369,28 @@ class PolicyNetwork(nn.Module):
                 LayerType.make(n_head=8, AdaLN=True, norm_before_AdaLN=True, condition_on='visual-tokens', name='cross')
             ] * 4 + [
                 LayerType.make(n_head=8, name='self')
-            ] * 4
+            ] * 4,
+
+            is_transformer_moe=self.is_transformer_moe,
+            is_emb_moe=self.is_emb_moe,
+            moe_multiple_gate=self.moe_multiple_gate,
+            moe_cfg=self.moe_cfg,      
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
         
         # gripper state only depends on xyz, but not rotation
         self.block_attn_directions = [(n, f'rot-{c}') for c in ['x', 'y', 'z'] for n in ['grip', 'collision']]
         self.cfg = model_cfg
+        
+        if hasattr(model_cfg, "rot_z_weight_factor"): # compatible with the old config
+            self.use_exponential_weight_flag: bool = True
+            self.rot_z_weight_factor: float = model_cfg.rot_z_weight_factor
+            self.rot_z_weight_max: float = model_cfg.rot_z_weight_max
+            self.exponential_weight: float = self.rot_z_weight_max
+        else:
+            self.use_exponential_weight_flag: bool = False
+            self.exponential_weight: float = 1.0
+        self.step:int = 0
     
     
     def multi_view_coordinate_sampler(self, lst_of_spatial_logits):
@@ -582,6 +604,12 @@ class PolicyNetwork(nn.Module):
                     tmp_loss_dict[k].append(v)
             
             loss_dicts.append({k: sum(v) / len(v) for k, v in tmp_loss_dict.items()})
+            #
+            # if 'aux_loss' in loss_dicts:
+            #     loss_dicts['aux_loss'] = loss_dicts['aux_loss']* self.moe_weight
+            # if 'aux_loss_adapter' in loss_dict:
+            #     loss_dicts['aux_loss_adapter'] = _loss_dict['aux_loss_adapter'].sum()/_loss_dict['aux_loss_adapter'].numel() * self.moe_weight
+            #
         else:
             prompt_seq = torch.zeros([bs, 0, 3], device=dev, dtype=torch.float32)
             future_tk_chk_ids = [dict(chk_id=0, tk_id=self.policy.token_name_2_ids['stage1-screen-pts'])]
@@ -737,10 +765,23 @@ class PolicyNetwork(nn.Module):
                 )
             )
             return continuous_action
-        
+    
+    def update(self):
+        self.step += 1
+        if self.use_exponential_weight_flag:
+           self.update_weight_exponential()
+    
+    def update_weight_exponential(self):
+        """Linear Decay Weight
+            Gradually reduce the weight over time:
 
-
-
+            𝑤(𝑡)=1+(max_weight−1)⋅exp(-alpha*𝑡)
+            
+            t: self.step - the time step for the weight to decay
+            max_weight⋅: self.rot_z_weight_max - the maximum value of W(t)
+            alpha: self.rot_z_weight_factor - how fast the weight decays to one
+        """        
+        self.exponential_weight = 1 + (self.rot_z_weight_max - 1) * math.exp(-self.rot_z_weight_factor * self.step)
 
 class Policy:
     def __init__(self, network: PolicyNetwork, model_cfg: DictConfig, log_dir=""):

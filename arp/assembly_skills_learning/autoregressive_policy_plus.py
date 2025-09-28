@@ -24,7 +24,7 @@ from utils.clip import clip_encode_text
 from PIL import Image
 from preprocess import CubePointCloudRenderer, preprocess_images_in_batch, \
     flatten_img_pc_to_points, clamp_pc_in_bound, place_pc_in_cube, generate_heatmap_from_screen_pts, \
-    apply_se3_augmentation, transform_pc, grid_sample_from_heatmap, add_uniform_noise, denorm_rgb
+    apply_se3_augmentation, transform_pc, grid_sample_from_heatmap, add_uniform_noise, denorm_rgb, save_smooth_spatial_label, save_rendered_images
 
 from utils.layers import (
     Conv2DBlock,
@@ -74,7 +74,7 @@ class PolicyNetwork(nn.Module):
         if model_cfg.render_with_cpp:
             assert model_cfg.mvt_cameras == ['top', 'left', 'front']
             self.render_with_cpp = True
-            from point_renderer.rvt_renderer import RVTBoxRenderer
+            from utils.RVTBoxRenderer import RVTBoxRenderer
             self.cpp_renderer = RVTBoxRenderer(device=render_device,
                                                img_size=(model_cfg.img_size, model_cfg.img_size),
                                                three_views=True,
@@ -386,6 +386,11 @@ class PolicyNetwork(nn.Module):
         img = self.render(pc, img_feat, self.mvt1)# img shape [batch_size, num_views, channels, height, width]
         #endregion ###########################
 
+        # __________________________________可视化debug_______________________________#
+        # out_dir = "/opt/data/private/arp/arp/assembly_skills_learning/outputs/debug_images_mvt1/sleeve/train"
+        # save_rendered_images(img,out_dir)
+        #_____________________________________________________________________________#
+
         #  extracts visual feature maps
         visual_featmap_1 = self.mvt1(img=img, proprio=proprio, lang_emb=lang_goal_embs) # [B, num_cameras, 128, np, np]
 
@@ -393,6 +398,12 @@ class PolicyNetwork(nn.Module):
         if self.training:
             # Generate ground truth spatial heatmap  # smooth_spatial_label_stage1 = action_trans.shape([48, 50176, 3]); screen_waypoint_stage1 = wpt_img.shape(([48, 3, 2]))
             smooth_spatial_label_stage1, screen_waypoint_stage1 = self.get_gt_translation_action(waypoint_stage1, dims=(bs, nc, h, w))
+
+             # __________________________________可视化debug_______________________________#
+            # 
+            # save_smooth_spatial_label(smooth_spatial_label_stage1, 224, 224, '/opt/data/private/arp/arp/assembly_skills_learning/outputs/debug_images_mvt1/smooth_heatmap_1.png')
+            #_____________________________________________________________________________#
+
             stage1_chk_ids = torch.as_tensor([0], device=dev)[None, :]
 
             # the 0, 0 are dummy input
@@ -461,6 +472,12 @@ class PolicyNetwork(nn.Module):
                 waypoint_stage2 = None
         # Render visual features for Stage 2. Same img_feat but with mvt2
         img = self.render(pc, img_feat, self.mvt2)
+
+        # __________________________________可视化debug_______________________________#
+        # out_dir = "/opt/data/private/arp/arp/assembly_skills_learning/outputs/debug_images_mvt2/sleeve/train"
+        # save_rendered_images(img,out_dir)
+        #_____________________________________________________________________________#
+
         visual_featmap_2 = self.mvt2(img=img, proprio=proprio, lang_emb=lang_goal_embs)
 
         if self.training:
@@ -623,9 +640,9 @@ class PolicyNetwork(nn.Module):
                     'v2_norm': norm(visual_featmap_2.flatten(0, 1))
             }
             # normalized with the number of elements in aux loss tensor
-            loss_dict['aux_loss'] = loss_dict['aux_loss'].sum()/loss_dict['aux_loss'].numel() * self.moe_weight
+            loss_dict['aux_loss'] = (loss_dict['aux_loss'].sum()/loss_dict['aux_loss'].numel() -1)* self.moe_weight
             if 'aux_loss_adapter' in loss_dict:
-                loss_dict['aux_loss_adapter'] = loss_dict['aux_loss_adapter'].sum()/loss_dict['aux_loss_adapter'].numel() * self.moe_weight
+                loss_dict['aux_loss_adapter'] = (loss_dict['aux_loss_adapter'].sum()/loss_dict['aux_loss_adapter'].numel() -1)* self.moe_weight
             
             return loss_dict
         else:

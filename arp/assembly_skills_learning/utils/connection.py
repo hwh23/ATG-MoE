@@ -60,13 +60,13 @@ class Connection:
         logger.info(f'{log_prefix("send", self.addr)} | Finish frame {obj["frame_idx"]}')
     
     def receive(self)->dict:
-        logger.info(f'{log_prefix("send", self.addr)} | Start')
+        logger.info(f'{log_prefix("receive", self.addr)} | Start')
         if self.proxy == 'json':
             data_dict = message.recv_json(self.conn)
         else:
             data_dict = message.recv_pickle(self.conn)
         self.recv_queue.put(data_dict)
-        logger.info(f'{log_prefix("send", self.addr)} | Finish frame {data_dict["frame_idx"]}')
+        logger.info(f'{log_prefix("receive", self.addr)} | Finish frame {data_dict["frame_idx"]}')
     
     
 class ConnectionQueues:

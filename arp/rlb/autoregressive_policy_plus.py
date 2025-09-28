@@ -40,6 +40,23 @@ from arp.util.arp import AutoRegressivePolicy, TokenType, LayerType, ModelConfig
 from autoregressive_policy import MultiViewTransformer, Policy
 import math
 
+def save_rendered_images(img: torch.Tensor, out_dir: str):
+    # 取第一个 batch，转到 H×W×C 并转回 cpu／numpy,img.shape:[B,V,C,H,W]
+    import cv2, os
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 取第一个 batch
+    for view_id in range(img.shape[1]):  # 3 个视角
+        vis = img[0, view_id]             # [C, H, W]
+        vis = vis.permute(1, 2, 0)        # -> [H, W, C]
+        if vis.shape[2] > 3:
+            vis = vis[..., 3:6]
+
+        cv2.imwrite(
+            os.path.join(out_dir, f"mvt1_render_view{view_id}.png"),
+            (vis.cpu().numpy() * 255).astype(np.uint8)[..., ::-1]  # RGB->BGR
+        )
 
 class PolicyNetwork(nn.Module):
     def __init__(self, model_cfg, env_cfg, render_device):
@@ -102,8 +119,9 @@ class PolicyNetwork(nn.Module):
         # then produce rot and grip separately
 
         #region parse moe properties
-        self.is_moe = model_cfg.is_moe if hasattr(model_cfg, "is_moe") else False
-        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_moe") else None
+        self.is_transformer_moe = model_cfg.is_transformer_moe if hasattr(model_cfg, "is_transformer_moe") else False
+        self.is_emb_moe = model_cfg.is_emb_moe if hasattr(model_cfg, "is_emb_moe") else False
+        self.moe_weight = model_cfg.moe_weight if hasattr(model_cfg, "is_transformer_moe") and hasattr(model_cfg, "is_emb_moe") else None
         self.moe_multiple_gate = model_cfg.moe_multiple_gate if hasattr(model_cfg, "moe_multiple_gate") else False
         self.moe_cfg = model_cfg.moe if hasattr(model_cfg, "moe") else None
         #endregion
@@ -151,17 +169,17 @@ class PolicyNetwork(nn.Module):
                 LayerType.make(n_head=8, name='self')
             ] * 6,
             
-            is_moe=self.is_moe,
+            is_transformer_moe=self.is_transformer_moe,
+            is_emb_moe=self.is_emb_moe,
             moe_multiple_gate=self.moe_multiple_gate,
-            moe_cfg=self.moe_cfg,
-            
+            moe_cfg=self.moe_cfg,            
         )
         self.policy = AutoRegressivePolicy(arp_cfg)
         
         # gripper state only depends on xyz, but not rotation
         self.block_attn_directions = [(n, f'rot-{c}') for c in ['x', 'y', 'z'] for n in ['grip', 'collision']]
         self.cfg = model_cfg
-    
+
     def update(self):
         self.step += 1
         if self.use_exponential_weight_flag:
@@ -384,6 +402,11 @@ class PolicyNetwork(nn.Module):
 
         # Render images with gt pc and noisy img_feat for Stage 1
         img = self.render(pc, img_feat, self.mvt1)# img shape [batch_size, num_views, channels, height, width]
+
+        # __________________________________可视化debug_______________________________#
+        out_dir = "/opt/data/private/arp/arp/rlb/outputs/debug_images_mvt1/eval"
+        save_rendered_images(img,out_dir)
+        #_____________________________________________________________________________#
         #endregion ###########################
 
         #  extracts visual feature maps
@@ -461,6 +484,12 @@ class PolicyNetwork(nn.Module):
                 waypoint_stage2 = None
         # Render visual features for Stage 2. Same img_feat but with mvt2
         img = self.render(pc, img_feat, self.mvt2)
+
+        # __________________________________可视化debug_______________________________#
+        out_dir = "/opt/data/private/arp/arp/rlb/outputs/debug_images_mvt2/eval"
+        save_rendered_images(img,out_dir)
+        #_____________________________________________________________________________#
+
         visual_featmap_2 = self.mvt2(img=img, proprio=proprio, lang_emb=lang_goal_embs)
 
         if self.training:
@@ -506,14 +535,51 @@ class PolicyNetwork(nn.Module):
 
             # ------------------------------------------- #
             
+            # # TODO　多尺度特征融合强化特征提取
+            # B, V, C, H, W = visual_featmap_2.shape
+
+            # # 1) 先把不同尺度特征做 1×1 降到同一通道数，例如 D=128
+            # D = C  
+            # lateral_convs = []
+            # for v in range(V):
+            #     # 给每个 view 一套 FPN lateral conv
+            #     lateral_convs.append(nn.Conv2d(C, D, kernel_size=1).to(visual_featmap_2.device))
+
+            # # 2) top‐down pathway + 融合
+            # fpn_feats = []  # 存每一层融合后的特征
+            # for view_id in range(V):
+            #     # 拿到这一路
+            #     feats = visual_featmap_2[:, view_id]   # [B, C, H, W]
+            #     # bottom (level 0)
+            #     c3 = lateral_convs[view_id](feats)     # [B, D, H, W]
+            #     # 构造更小尺度：C4: 1/2、C5: 1/4
+            #     c4 = F.max_pool2d(c3, kernel_size=2)    # [B, D, H/2, W/2]
+            #     c5 = F.max_pool2d(c4, kernel_size=2)    # [B, D, H/4, W/4]
+
+            #     # top‐down：把 C5 上采样 + C4 做融合 → P4
+            #     p5 = c5
+            #     p4 = F.interpolate(p5, size=c4.shape[-2:], mode='bilinear', align_corners=False) + c4
+            #     p3 = F.interpolate(p4, size=c3.shape[-2:], mode='bilinear', align_corners=False) + c3
+
+            #     # 全局池化：P3,P4,P5 每个做 GAP → [B, D]
+            #     for p in (p3, p4, p5):
+            #         pooled = p.flatten(2).max(-1)[0]  # torch.max over spatial → [B, D]
+            #         fpn_feats.append(pooled)
+
+            # # 3) 将所有 view 和所有尺度拼到一起
+            # # fpn_feats 总共有 V * 3 个 [B, D]
+            # prompt_features = torch.stack(fpn_feats, dim=1)
+            # # → shape [B, V*3, D]
+
             # compute gripper loss
             prompt_features = torch.cat([ # [bs, 6, 128]
                     grid_sample_from_heatmap(screen_waypoint_stage2.reshape(-1, 1, 2) / self.img_patch_size, 
                                             visual_featmap_2.flatten(0, 1))[0].reshape(bs, -1, 128),
                     visual_featmap_2.max(dim=-1)[0].max(dim=-1)[0]], dim=1)
+            P = prompt_features.shape[1]
             
-            seq = torch.as_tensor([(i, self.policy.token_name_2_ids['prompt-features']) for i in range(6)], 
-                                  device=dev).reshape(1, 6, 2).repeat(bs, 1, 1)
+            seq = torch.as_tensor([(i, self.policy.token_name_2_ids['prompt-features']) for i in range(P)], 
+                                  device=dev).reshape(1, P, 2).repeat(bs, 1, 1)
             seq = torch.cat([seq, torch.cat([
                                     torch.cat([
                                         action_rot_aug_x[:, None, None],
@@ -524,7 +590,7 @@ class PolicyNetwork(nn.Module):
                                     torch.as_tensor([self.policy.token_name_2_ids[k] for k in ['rot-x', 'rot-y', 'rot-z', 'grip', 'collision']], 
                                                     device=dev)[None, :, None].repeat(bs, 1, 1)], dim=-1)
                              ], dim=1)
-            chk_ids = torch.as_tensor(list(range(11)), device=dev)[None, :]
+            chk_ids = torch.as_tensor(list(range(5 + P)), device=dev)[None, :] # 11表示：Stage 2 需要同时预测“rot-x, rot-y, rot-z, grip, collision”（5 个 token）再加上前面的 6（多尺度是９） 个 prompt features，共 11 个位置，导致 chunk length=11。
             loss_dict_gripper = self.policy.compute_loss(seq, chk_ids,
                                                          block_attn_directions=self.block_attn_directions, 
                                                          match_layer='self', contexts={
@@ -560,11 +626,12 @@ class PolicyNetwork(nn.Module):
                     grid_sample_from_heatmap(screen_waypoint_stage2.reshape(-1, 1, 2) / self.img_patch_size, 
                                             visual_featmap_2.flatten(0, 1))[0].reshape(bs, -1, 128),
                     visual_featmap_2.max(dim=-1)[0].max(dim=-1)[0]], dim=1)
+            P = prompt_features.shape[1]
             
-            prompt_seq = torch.as_tensor([(i, self.policy.token_name_2_ids['prompt-features']) for i in range(6)], 
-                                  device=dev).reshape(1, 6, 2).repeat(bs, 1, 1)
+            prompt_seq = torch.as_tensor([(i, self.policy.token_name_2_ids['prompt-features']) for i in range(P)], 
+                                  device=dev).reshape(1, P, 2).repeat(bs, 1, 1)
             future_tk_chk_ids = [dict(chk_id=chk_id, tk_id=self.policy.token_name_2_ids[tk_name]) 
-                                 for chk_id, tk_name in zip(range(6, 11), ['rot-x', 'rot-y', 'rot-z', 'grip', 'collision'])]
+                                 for chk_id, tk_name in zip(range(P, 5 + P), ['rot-x', 'rot-y', 'rot-z', 'grip', 'collision'])]
             
             result_seq_stage2 = self.policy.generate(prompt_seq, future_tk_chk_ids, match_layer='self', 
                                                     sample=False,  block_attn_directions=self.block_attn_directions,  

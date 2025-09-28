@@ -6,8 +6,9 @@ from utils_with_rlbench import TASK_TO_ID
 
 class RolloutGenerator(object):
 
-    def __init__(self, device = 'cuda:0'):
+    def __init__(self, device = 'cuda:0', use_custom_obs=False):
         self._env_device = device
+        self.use_custom_obs = use_custom_obs
 
     def _get_type(self, x):
         if not hasattr(x, 'dtype'): return np.float32
@@ -47,7 +48,7 @@ class RolloutGenerator(object):
             extra_replay_elements = {k: np.array(v) for k, v in act_result.replay_elements.items()}
 
             transition = env.step(act_result)
-            obs_tp1 = dict(transition.observation)
+            obs_tp1 = self.get_obs(transition)
             timeout = False
             if step == episode_length - 1:
                 # If last transition, and not terminal, then we timed out
@@ -63,7 +64,7 @@ class RolloutGenerator(object):
             obs_and_replay_elems.update(extra_replay_elements)
 
             for k in obs_history.keys():
-                obs_history[k] = transition.observation[k]
+                obs_history[k] = self.get_obs(transition)[k]
 
             transition.info["active_task_id"] = env.active_task_id
 
@@ -85,9 +86,34 @@ class RolloutGenerator(object):
 
             if record_enabled and transition.terminal or timeout or step == episode_length - 1:
                 env.env._action_mode.arm_action_mode.record_end(env.env._scene, steps=60, step_scene=True)
-            obs = dict(transition.observation)
+            obs = self.get_obs(transition)
 
             yield replay_transition
 
             if transition.info.get("needs_reset", transition.terminal):
                 return
+            
+    def get_obs(self, transition: FullTransition):
+        if self.use_custom_obs:
+            # TODO : Handle custom observation logic
+            # This is a placeholder for custom observation handling.
+            # obs.keys()
+            # dict_keys(['left_shoulder_rgb', 'left_shoulder_mask', 'left_shoulder_point_cloud', # shape 3, 128, 128
+            # 'right_shoulder_rgb', 'right_shoulder_mask', 'right_shoulder_point_cloud',  # shape 3, 128, 128
+            # 'wrist_rgb', 'wrist_mask', 'wrist_point_cloud',  # shape 3, 128, 128
+            # 'front_rgb', 'front_mask', 'front_point_cloud',  # shape 3, 128, 128
+            # 'ignore_collisions',  # shape 1, (1. or 0.)
+            # 'low_dim_state', # shape (3,)
+            # 'left_shoulder_camera_extrinsics', # (4, 4)
+            # 'left_shoulder_camera_intrinsics', # (3, 3)
+            # 'right_shoulder_camera_extrinsics', 'right_shoulder_camera_intrinsics', 
+            # 'front_camera_extrinsics', 'front_camera_intrinsics', 'wrist_camera_extrinsics', 
+            # 'wrist_camera_intrinsics', 
+            # 'lang_goal_tokens', # shape (77,)
+            # 'gripper_pose', # shape (7,)
+            # 'gripper_open' # float, 0. or 1.
+            # ])
+            obs = None
+        else:
+            obs = dict(transition.observation)
+        return obs

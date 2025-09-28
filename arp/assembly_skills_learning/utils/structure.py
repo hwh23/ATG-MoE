@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 
 PROPRIOCEPTION = 'low_dim_obs.pkl'
 KEYPOINT_JSON = "kfs.json" # 
+# KEYPOINT_JSON = "kfs.test.json" # 
 VARIATION_NUMBER_PICKLE = 'variation_number.pkl' # 
 LANG_GOAL_EMB = "lang_emb.pkl" #
 DESC_PICKLE = "variation_descriptions.json"
@@ -18,7 +19,9 @@ LOW_DIM_PICKLE = 'low_dim_obs.pkl'
 CAMERA_JSON = 'camera_matrix.json'
 
 ASSEMBLY_TASKS = [
-    "piston_sleeve_installation"
+    "piston_sleeve_installation",
+    "sleeve_fixturing",
+    "rod_sleeve_assembly"
 ]
 # 得到一个字典，如TASK_TO_ID["turn_tap"] 会返回 0
 SKILL_TO_ID = {task: i for i, task in enumerate(ASSEMBLY_TASKS)}

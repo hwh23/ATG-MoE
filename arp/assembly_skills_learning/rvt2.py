@@ -982,6 +982,61 @@ class Policy(nn.Module):
             )
         )
         return ActResult(continuous_action)
+    
+    def act_tcp(
+        self, observation: dict
+    ) -> ActResult:
+        proprio = observation["low_dim_state"]
+
+        # NOTE: only for matching original outputs debugging
+        # observation_ref = torch.load("/common/home/xz653/Desktop/obs.pth", map_location="cpu")
+        # observation_old = observation
+        # observation = {k: v[:, 0].to(self._device) for k, v in observation_ref.items()}
+        # assert torch.all(observation['lang_goal_tokens'] == lang_goal_tokens)
+
+        obs, pcd = preprocess_images_in_batch(observation, self.cameras)
+        pc, img_feat = flatten_img_pc_to_points(obs, pcd)
+
+        pc, img_feat = clamp_pc_in_bound(
+            pc, img_feat, self.scene_bounds, skip=not self.move_pc_in_bound
+        )
+        pc_new = []
+        rev_trans = []
+        for _pc in pc:
+            a, b = place_pc_in_cube(
+                _pc,
+                with_mean_or_bounds=self._place_with_mean,
+                scene_bounds=None if self._place_with_mean else self.scene_bounds,
+            )
+            pc_new.append(a)
+            rev_trans.append(b)
+        pc = pc_new
+
+        bs = len(pc)
+        nc = self._net_mod.num_cameras
+        h = w = self._net_mod.img_size
+        out = self._network(
+            pc=pc,
+            img_feat=img_feat,
+            proprio=proprio,
+            lang_emb=observation["lang_goal_embs"],
+        )
+        _, rot_q, grip_q, collision_q = self.get_logits(
+            out, dims=(bs, nc, h, w), only_pred=True
+        )
+        pred_wpt, pred_rot_quat, pred_grip, pred_coll = self.derive_prediction(
+            out, rot_q, grip_q, collision_q, rev_trans
+        )
+        continuous_action = np.concatenate(
+            (
+                pred_wpt[0].cpu().numpy(),
+                pred_rot_quat[0],
+                pred_grip[0].cpu().numpy(),
+                pred_coll[0].cpu().numpy(),
+            )
+        )
+        return ActResult(continuous_action)
+
 
     def derive_prediction(
         self,

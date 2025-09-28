@@ -214,7 +214,15 @@ def main_single(rank: int, cfg: DictConfig, port: int, log_dir:str):
         # —— 新增：子进程干净退出 —— 
         if not on_master:
             os._exit(0)
-    
+
+def wrapper(*args, **kwargs):
+    try:
+        main_single(*args, **kwargs)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 # @hydra.main(config_path="./configs", config_name="arp_plus.yaml",version_base="1.1")
 @configurable() # 多卡无法解析output dir
@@ -227,7 +235,7 @@ def main(cfg: DictConfig):
         # OmegaConf.resolve(cfg)
         # output_dir = str(cfg.output_dir)
         port = find_free_port()
-        mp.spawn(main_single, args=(cfg, port, cfg.output_dir),  nprocs=cfg.train.num_gpus, join=True)
+        mp.spawn(wrapper, args=(cfg, port, cfg.output_dir),  nprocs=cfg.train.num_gpus, join=True)
         print(f"Training finished, logs are saved to {cfg.output_dir}")
 
 if __name__ == "__main__":

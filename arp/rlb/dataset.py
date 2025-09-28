@@ -37,12 +37,12 @@ def get_demo_essential_info(data_path, episode_ind):
     return obs
 
 
-def retreive_full_observation(essential_obs, episode_path, i, load_mask=False, skip_rgb=False):
-    CAMERA_FRONT = 'front'
-    CAMERA_LS = 'left_shoulder'
-    CAMERA_RS = 'right_shoulder'
-    CAMERA_WRIST = 'wrist'
-    CAMERAS = [CAMERA_FRONT, CAMERA_LS, CAMERA_RS, CAMERA_WRIST]
+def retreive_full_observation(cameras, essential_obs, episode_path, i, load_mask=False, skip_rgb=False):
+    # CAMERA_FRONT = 'front'
+    # CAMERA_LS = 'left_shoulder'
+    # CAMERA_RS = 'right_shoulder'
+    # CAMERA_WRIST = 'wrist'
+    # CAMERAS = [CAMERA_FRONT, CAMERA_LS, CAMERA_RS, CAMERA_WRIST]
 
     IMAGE_RGB = 'rgb'
     IMAGE_DEPTH = 'depth'
@@ -50,50 +50,21 @@ def retreive_full_observation(essential_obs, episode_path, i, load_mask=False, s
 
     obs = {}
 
-    if load_mask:
-        for c in CAMERAS:
-            obs[f"{c}_mask"] = np.array(
-                Image.open(osp.join(episode_path, f"{c}_mask", IMAGE_FORMAT % i))
+    for camera in cameras:
+        if load_mask:
+            obs[f"{camera}_mask"] = np.array(
+                Image.open(osp.join(episode_path, f"{camera}_mask", IMAGE_FORMAT % i))
             )
+        if not skip_rgb:
+            obs[f"{camera}_rgb"] = np.array(Image.open(osp.join(episode_path, '%s_%s' % (camera, IMAGE_RGB), IMAGE_FORMAT % i)).convert("RGB"))
+        obs[f"{camera}_depth"] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (camera, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
+        near = essential_obs.misc['%s_camera_near' % (camera)]
+        far = essential_obs.misc['%s_camera_far' % (camera)]
+        obs[f"{camera}_depth"] = near + obs[f"{camera}_depth"] * (far - near)
 
-    if not skip_rgb:
-        obs['front_rgb'] = np.array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_FRONT, IMAGE_RGB), IMAGE_FORMAT % i)))
-        obs['left_shoulder_rgb'] = np.array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_LS, IMAGE_RGB), IMAGE_FORMAT % i)))
-        obs['right_shoulder_rgb'] = np.array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_RS, IMAGE_RGB), IMAGE_FORMAT % i)))
-        obs['wrist_rgb'] = np.array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_WRIST, IMAGE_RGB), IMAGE_FORMAT % i)))
-
-    obs['front_depth'] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_FRONT, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
-    near = essential_obs.misc['%s_camera_near' % (CAMERA_FRONT)]
-    far = essential_obs.misc['%s_camera_far' % (CAMERA_FRONT)]
-    obs['front_depth'] = near + obs['front_depth'] * (far - near)
-
-    obs['left_shoulder_depth'] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_LS, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
-    near = essential_obs.misc['%s_camera_near' % (CAMERA_LS)]
-    far = essential_obs.misc['%s_camera_far' % (CAMERA_LS)]
-    obs['left_shoulder_depth'] = near + obs['left_shoulder_depth'] * (far - near)
-
-    obs['right_shoulder_depth'] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_RS, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
-    near = essential_obs.misc['%s_camera_near' % (CAMERA_RS)]
-    far = essential_obs.misc['%s_camera_far' % (CAMERA_RS)]
-    obs['right_shoulder_depth'] = near + obs['right_shoulder_depth'] * (far - near)
-
-    obs['wrist_depth'] = image_to_float_array(Image.open(osp.join(episode_path, '%s_%s' % (CAMERA_WRIST, IMAGE_DEPTH), IMAGE_FORMAT % i)), DEPTH_SCALE)
-    near = essential_obs.misc['%s_camera_near' % (CAMERA_WRIST)]
-    far = essential_obs.misc['%s_camera_far' % (CAMERA_WRIST)]
-    obs['wrist_depth'] = near + obs['wrist_depth'] * (far - near)
-
-    obs['front_point_cloud'] = VisionSensor.pointcloud_from_depth_and_camera_params(obs['front_depth'],
-                                                                                    essential_obs.misc['front_camera_extrinsics'],
-                                                                                    essential_obs.misc['front_camera_intrinsics'])
-    obs['left_shoulder_point_cloud'] = VisionSensor.pointcloud_from_depth_and_camera_params(obs['left_shoulder_depth'],
-                                                                                            essential_obs.misc['left_shoulder_camera_extrinsics'],
-                                                                                            essential_obs.misc['left_shoulder_camera_intrinsics'])
-    obs['right_shoulder_point_cloud'] = VisionSensor.pointcloud_from_depth_and_camera_params(obs['right_shoulder_depth'],
-                                                                                            essential_obs.misc['right_shoulder_camera_extrinsics'],
-                                                                                            essential_obs.misc['right_shoulder_camera_intrinsics'])
-    obs['wrist_point_cloud'] = VisionSensor.pointcloud_from_depth_and_camera_params(obs['wrist_depth'],
-                                                                                    essential_obs.misc['wrist_camera_extrinsics'],
-                                                                                    essential_obs.misc['wrist_camera_intrinsics'])
+        obs[f"{camera}_point_cloud"] = VisionSensor.pointcloud_from_depth_and_camera_params(obs[f"{camera}_depth"],
+                                                                                    essential_obs.misc[f"{camera}_camera_extrinsics"],
+                                                                                    essential_obs.misc[f"{camera}_camera_intrinsics"])
     return obs
 
 
@@ -244,7 +215,7 @@ class TransitionDataset(Dataset):
             variation_id = episode['obs'].variation_number
             essential_obs = episode['obs'][obs_frame_id]
             essential_kp_obs = episode['obs'][kp_frame_id]
-            obs_media_dict = retreive_full_observation(essential_obs, episode_path, obs_frame_id)
+            obs_media_dict = retreive_full_observation(self.cameras, essential_obs, episode_path, obs_frame_id)
 
             if self.origin_style_state:
                 curr_low_dim_state = np.array([essential_obs.gripper_open, *essential_obs.gripper_joint_positions])

@@ -6,7 +6,7 @@ hydra:
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/${now:%Y-%m-%d_%H-%M} # 多卡时不要用now
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.4_100epochs_all_tasks_1gpu/${now:%Y-%m-%d_%H-%M} 
     # dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.21_3tasks_1gpu_2MlpExperts_alpha_oldChunk/${now:%Y-%m-%d_%H-%M} 
-    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_5.21_3tasks_1gpu_oldChunk/${now:%Y-%m-%d_%H-%M} 
+    dir: outputs/${hydra.job.name}/lr${model.hp.lr}/moe${model.hp.is_moe}/2025_6.24_3tasks_1gpu_RelChunkAttn/${now:%Y-%m-%d_%H-%M} 
 
 # ================================================ #
 
@@ -23,7 +23,7 @@ model:
     moe_weight: 1 # 0.5 #2 
     moe:
       multiple_gate: True # false
-      num_experts: 2 # 4 #16 #8
+      num_experts: 4 # 4 #16 #8
       k: 1 #2 #4 #可以留一个num_moe_layers的接口
       num_shared_experts: 0 # not available yet
     add_corr: true
@@ -84,7 +84,7 @@ model:
 
 
 env:
-  tasks: stack_cups,turn_tap,open_drawer # stack_cups,turn_tap,open_drawer,push_buttons,slide_block_to_color_target # stack_cups, before all
+  tasks: meat_off_grill,open_drawer,insert_onto_square_peg # stack_cups,turn_tap,open_drawer # stack_cups,turn_tap,open_drawer,push_buttons,slide_block_to_color_target # stack_cups, before all
   cameras: ["front", "left_shoulder", "right_shoulder", "wrist"]
   scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6] # [x_min, y_min, z_min, x_max, y_max, z_max] - the metric volume to be voxelized
   image_size: 128
@@ -97,7 +97,7 @@ env:
 train:
   bs: 48 #before 96 # 48
   demo_folder: ./data/train
-  epochs: 16 # 30 # 16 # before 100 # 16
+  epochs: 18 # 30 # 16 # before 100 # 16
   num_gpus: 1 # before 4
   num_workers: 16 # before 8, need larger value
   num_transitions_per_epoch: 160000 # 80000 #before 160000 # iters=num_transitions_per_epoch*epochs/bs/world_size
