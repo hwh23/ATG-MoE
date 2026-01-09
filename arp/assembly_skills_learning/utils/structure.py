@@ -21,7 +21,12 @@ CAMERA_JSON = 'camera_matrix.json'
 ASSEMBLY_TASKS = [
     "piston_sleeve_installation",
     "sleeve_fixturing",
-    "rod_sleeve_assembly"
+    "rod_sleeve_assembly",
+    "rod_fixturing",
+    "large_spring_installation",
+    "nut_sleeve_assembly",
+    "plug_sleeve_assembly",
+    "spring_sleeve_assembly",
 ]
 # 得到一个字典，如TASK_TO_ID["turn_tap"] 会返回 0
 SKILL_TO_ID = {task: i for i, task in enumerate(ASSEMBLY_TASKS)}

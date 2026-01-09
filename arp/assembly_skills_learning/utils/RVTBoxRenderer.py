@@ -58,7 +58,9 @@ class RVTBoxRenderer(BaseRVTBoxRenderer):
             "front": {"eye": [1, 0, 0], "at": [0, 0, 0], "up": [0, 0, 1]},
             "down": {"eye": [0, 0, -1], "at": [0, 0, 0], "up": [0, 1, 0]},
             "back": {"eye": [-1, 0, 0], "at": [0, 0, 0], "up": [0, 0, 1]},
+            "back_top": {"eye": [-1, 0, 0.5], "at": [0, 0, 0], "up": [0, 0, 1]},
             "left": {"eye": [0, -1, 0], "at": [0, 0, 0], "up": [0, 0, 1]},
+            "left_top": {"eye": [0, -1, 0.5], "at": [0, 0, 0], "up": [0, 0, 1]},
             "right": {"eye": [0, 0.5, 0], "at": [0, 0, 0], "up": [0, 0, 1]},
         }
 
@@ -74,6 +76,7 @@ class RVTBoxRenderer(BaseRVTBoxRenderer):
                 )
 
         if three_views:
+            # cam_names = ["top", "back", "left_top"]
             cam_names = ["top", "back", "left"] # original: ["top", "front", "right"] in rvt_renderer.py
         elif two_views:
             cam_names = ["top", "front"]
