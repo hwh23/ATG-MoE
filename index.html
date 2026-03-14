@@ -7,7 +7,7 @@
   
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
   
-  <style>
+  <!-- <style>
     .publication-title { margin-bottom: 20px; font-weight: bold; }
     .publication-authors { margin-bottom: 10px; }
     .author-block { margin-right: 15px; }
@@ -17,11 +17,71 @@
     a:hover { text-decoration: underline; }
     .teaser-video { border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); } 
     .bibtex-section { background-color: #f5f5f5; padding: 20px; border-radius: 5px; }
+  </style> -->
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:wght@400;700&family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
+  
+  <style>
+    /* 全局字体设置 */
+    body { font-family: 'Roboto', sans-serif; color: #333; }
+    h1, h2, h3, .title { font-family: 'Noto Serif', serif; }
+    
+    /* 顶部标题区：添加极其微弱的高级灰渐变背景 */
+    .hero-section {
+      background: linear-gradient(135deg, #ffffff 0%, #f4f5f7 100%);
+      padding-bottom: 2rem;
+    }
+
+    /* 标题与作者排版 */
+    .publication-title { margin-bottom: 20px; font-weight: 700; color: #1a1a1a; }
+    .publication-authors { margin-bottom: 10px; }
+    .author-block { margin-right: 15px; font-weight: 400; }
+    .institution-block { font-size: 0.9em; color: #7a7a7a; margin-top: 10px; }
+    .institution-space { margin-left: 20px; } 
+    
+    /* 超链接颜色调整为稍暗的高级蓝 */
+    a { color: #205ac6; text-decoration: none; transition: color 0.2s ease; }
+    a:hover { color: #11367a; text-decoration: none; }
+
+    /* 按钮高级悬浮动画 (微浮雕效果) */
+    .button.is-dark {
+      background-color: #363636;
+      transition: all 0.3s ease;
+      border: none;
+    }
+    .button.is-dark:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 15px rgba(0, 0, 0, 0.15);
+      background-color: #1a1a1a;
+    }
+
+    /* 图片和视频的柔和阴影与悬浮放大 */
+    .teaser-video, .fancy-img { 
+      border-radius: 12px; 
+      box-shadow: 0 8px 20px rgba(0,0,0,0.08); 
+      transition: transform 0.3s ease;
+    }
+    .teaser-video:hover, .fancy-img:hover {
+      transform: scale(1.01);
+    }
+
+    /* 交替的斑马线背景色，用于区分不同的 Section */
+    .section-light { background-color: #fcfcfc; border-top: 1px solid #f0f0f0; border-bottom: 1px solid #f0f0f0;}
+    
+    /* BibTeX 引用框美化 */
+    .bibtex-section { 
+      background-color: #f5f6f8; 
+      padding: 20px; 
+      border-radius: 8px; 
+      border-left: 4px solid #363636;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.9em;
+    }
   </style>
 </head>
 <body>
 
-  <section class="section">
+  <!-- <section class="section"> -->
+  <section class="section hero-section">
     <div class="container has-text-centered">
       
       <h1 class="title is-2 publication-title">
@@ -85,7 +145,8 @@
     </div>
   </section>
 
-  <section class="section">
+  <!-- <section class="section"> -->
+  <section class="section section-light">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
         <div class="column is-full">
@@ -113,7 +174,7 @@
           <h2 class="title is-3 has-text-centered">Methodology</h2>
           
           <div class="has-text-centered" style="margin-bottom: 20px;">
-            <img src="./static/images/architecture.png" alt="ATG-MoE Architecture Diagram" style="width: 100%; border-radius: 5px;">
+            <img src="./static/images/architecture.png" class="fancy-img" alt="ATG-MoE Architecture Diagram" style="width: 100%; border-radius: 5px;">
             <p class="is-size-7 has-text-grey" style="margin-top: 10px;">
               <strong>Figure 1:</strong> Overview of ATG-MoE framework with its three main modules.
             </p>
@@ -152,10 +213,10 @@
             </p>
           </div>
           <div class="has-text-centered">
-            <img src="./static/images/table1.png" alt="Simulation Results Table" style="width: 90%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <img src="./static/images/table1.png" class="fancy-img" alt="Simulation Results Table" style="width: 90%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <p class="is-size-7 has-text-grey"><strong>Table 1:</strong> Comparison of different methods in simulation experiments.</p>
             
-            <img src="./static/images/figure9.png" alt="Trajectory Visualization" style="width: 80%; margin-top: 20px; border-radius: 5px;">
+            <img src="./static/images/figure9.png" class="fancy-img" alt="Trajectory Visualization" style="width: 80%; margin-top: 20px; border-radius: 5px;">
             <p class="is-size-7 has-text-grey"><strong>Figure 9:</strong> 3D representation of successful trajectories for the Large Spring Insertion skill. ATG-MoE generates trajectories most consistent with the ground-truth demonstration.</p>
           </div>
         </div>
@@ -171,7 +232,7 @@
             </p>
           </div>
           <div class="has-text-centered">
-            <img src="./static/images/figure11.png" alt="Cross-skill Generalization Heatmaps" style="width: 85%; border-radius: 5px;">
+            <img src="./static/images/figure11.png" class="fancy-img" alt="Cross-skill Generalization Heatmaps" style="width: 85%; border-radius: 5px;">
             <p class="is-size-7 has-text-grey"><strong>Figure 11:</strong> Heatmaps evaluating the cross-skill generalization capability of ATG-MoE (left: Grasp Success Rate, right: Overall Success Rate).</p>
           </div>
         </div>
@@ -187,10 +248,10 @@
             </p>
           </div>
           <div class="has-text-centered">
-            <img src="./static/images/table3.png" alt="Multi-skill Learning Table" style="width: 80%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <img src="./static/images/table3.png" class="fancy-img" alt="Multi-skill Learning Table" style="width: 80%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <p class="is-size-7 has-text-grey"><strong>Table 3:</strong> Evaluation of the multi-skill learning capability using three skills from different categories.</p>
 
-            <img src="./static/images/figure12.png" alt="Application Scenario" style="width: 90%; margin-top: 20px; border-radius: 5px;">
+            <img src="./static/images/figure12.png" class="fancy-img" alt="Application Scenario" style="width: 90%; margin-top: 20px; border-radius: 5px;">
             <p class="is-size-7 has-text-grey"><strong>Figure 12:</strong> Application scenario of multi-skill integration guided by natural language instructions.</p>
           </div>
         </div>
@@ -206,10 +267,10 @@
             </p>
           </div>
           <div class="has-text-centered">
-            <img src="./static/images/figure13.png" alt="Real-world Execution Sequences" style="width: 100%; margin-bottom: 15px; border-radius: 5px;">
+            <img src="./static/images/figure13.png" class="fancy-img" alt="Real-world Execution Sequences" style="width: 100%; margin-bottom: 15px; border-radius: 5px;">
             <p class="is-size-7 has-text-grey"><strong>Figure 13:</strong> Real-world execution sequences of representative assembly skills.</p>
             
-            <img src="./static/images/table4.png" alt="Real-world Results Table" style="width: 60%; margin-top: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <img src="./static/images/table4.png" class="fancy-img" alt="Real-world Results Table" style="width: 60%; margin-top: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <p class="is-size-7 has-text-grey"><strong>Table 4:</strong> ATG-MoE’s performance across different skills in real-world experiments.</p>
           </div>
         </div>
