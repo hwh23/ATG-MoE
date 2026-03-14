@@ -21,6 +21,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:wght@400;700&family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
   
   <style>
+    html { scroll-behavior: smooth; scroll-padding-top: 60px; }
     /* 全局字体设置 */
     body { font-family: 'Roboto', sans-serif; color: #333; }
     h1, h2, h3, .title { font-family: 'Noto Serif', serif; }
@@ -78,7 +79,25 @@
     }
   </style>
 </head>
-<body>
+<body class="has-navbar-fixed-top">
+
+  <nav class="navbar is-dark is-fixed-top" role="navigation" aria-label="main navigation" style="background-color: #1a1a1a; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+    <div class="container is-max-desktop">
+      <div class="navbar-brand">
+        <a class="navbar-item" href="#">
+          <img src="./static/images/tsinghua_logo.png" alt="Logo" style="max-height: 2.2rem; margin-right: 10px;">
+          <span style="font-weight: bold; font-size: 1.2rem; color: white;">ATG-MoE</span>
+        </a>
+      </div>
+      <div class="navbar-menu is-active" style="background-color: transparent; box-shadow: none;">
+        <div class="navbar-end">
+          <a class="navbar-item" href="#abstract" style="color: #e0e0e0;">Abstract</a>
+          <a class="navbar-item" href="#method" style="color: #e0e0e0;">Method</a>
+          <a class="navbar-item" href="#experiments" style="color: #e0e0e0;">Experiments</a>
+        </div>
+      </div>
+    </div>
+  </nav>
 
   <!-- <section class="section"> -->
   <section class="section hero-section">
@@ -138,7 +157,7 @@
             您的浏览器不支持视频播放。
           </video>
           <h2 class="subtitle has-text-centered" style="margin-top: 15px; font-size: 1.1em; color: #555;">
-            <strong>ATG-MoE</strong> establishes a closed-loop mapping from multimodal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories.
+            <strong>ATG-MoE</strong> establishes a closed-loop mapping from multi-modal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories.
           </h2>
         </div>
       </div>
@@ -146,7 +165,7 @@
   </section>
 
   <!-- <section class="section"> -->
-  <section class="section section-light">
+  <section class="section section-light" id="abstract">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
         <div class="column is-full">
@@ -156,7 +175,7 @@
               Flexible manufacturing requires robot systems that can adapt to changing tasks, object categories, and environmental conditions. However, traditional robot programming is labor-intensive and inflexible, while existing learning-based assembly methods often suffer from weak positional generalization, complex multi-stage designs, and limited multi-skill integration capability. To address these issues, this paper proposes ATG-MoE, an end-to-end autoregressive trajectory generation method with mixture of experts for assembly skill learning from demonstration.
             </p>
             <p>
-              The proposed method establishes a closed-loop mapping from multimodal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories. It integrates multimodal feature fusion for scene and task understanding, autoregressive sequence modeling for temporally coherent trajectory generation, and a mixture-of-experts architecture for unified multi-skill learning through the balance of shared knowledge and skill specialization. In contrast to conventional frameworks that separate perception and control or train different skills independently, ATG-MoE directly incorporates visual information into trajectory generation and supports efficient multi-skill integration within a single model.
+              The proposed method establishes a closed-loop mapping from multi-modal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories. It integrates multi-modal feature fusion for scene and task understanding, autoregressive sequence modeling for temporally coherent trajectory generation, and a mixture-of-experts architecture for unified multi-skill learning through the balance of shared knowledge and skill specialization. In contrast to conventional frameworks that separate perception and control or train different skills independently, ATG-MoE directly incorporates visual information into trajectory generation and supports efficient multi-skill integration within a single model.
             </p>
             <p>
               We train and evaluate the proposed method on eight representative assembly skills from a pressure-reducing valve assembly task. Experimental results show that ATG-MoE achieves strong overall performance in simulation, with an average grasp success rate of 96.3% and an average overall success rate of 91.8%, while also demonstrating strong generalization and effective multi-skill integration. Real-world experiments further verify its practicality for multi-skill industrial assembly.
@@ -167,7 +186,7 @@
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="method">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
         <div class="column is-full">
@@ -182,11 +201,11 @@
 
           <div class="content has-text-justified">
             <p>
-              The method establishes a closed-loop learning pipeline that maps multimodal inputs, including RGB-D images and natural language instructions, to trajectory outputs. The core contribution of ATG-MoE lies in the coordinated design of three modules:
+              The method establishes a closed-loop learning pipeline that maps multi-modal inputs, including RGB-D images and natural language instructions, to trajectory outputs. The core contribution of ATG-MoE lies in the coordinated design of three modules:
             </p>
             <ul>
-              <li><strong>Multimodal feature extraction and fusion:</strong> Improve the robot's integrated understanding of 3D spatial information, scene semantics, and skill goals by encoding and combining visual perception with instructions.</li>
-              <li><strong>Autoregressive trajectory generation:</strong> Introduces a sequence modeling mechanism based on conditional probability, where subsequent actions are predicted from historical trajectories together with multimodal scene information, thereby ensuring temporal continuity and dynamic adaptability in the generated trajectory.</li>
+              <li><strong>multi-modal feature extraction and fusion:</strong> Improve the robot's integrated understanding of 3D spatial information, scene semantics, and skill goals by encoding and combining visual perception with instructions.</li>
+              <li><strong>Autoregressive trajectory generation:</strong> Introduces a sequence modeling mechanism based on conditional probability, where subsequent actions are predicted from historical trajectories together with multi-modal scene information, thereby ensuring temporal continuity and dynamic adaptability in the generated trajectory.</li>
               <li><strong>Multi-skill learning:</strong> Adopts a mixture-of-experts architecture, in which a skill-specific routing network learns expert combinations tailored to different skills, while shared experts support the learning of common knowledge.</li>
             </ul>
           </div>
@@ -196,7 +215,7 @@
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="experiments">
     <div class="container is-max-desktop">
       <h2 class="title is-3 has-text-centered">Experiments & Results</h2>
       <p class="has-text-centered" style="margin-bottom: 40px;">
@@ -244,7 +263,7 @@
           <div class="content has-text-justified">
             <p>
               <strong>Can ATG-MoE support integrated learning and coordinated invocation of multiple skills?</strong> <br>
-              Through its MoE design, ATG-MoE simultaneously captures shared knowledge across skills while preserving skill-specific specialization. Under a 3-skill joint training setting, the single model achieves an average GSR of 94.79% and OSR of 90.62%, showing little evidence of catastrophic forgetting. It can continuously invoke multiple skills (e.g., Sleeve Placement → Large Spring Insertion → Rod Seating) under natural language instructions to accomplish long-horizon assembly.
+              Through its MoE design, ATG-MoE simultaneously captures shared knowledge across skills while preserving skill-specific specialization. Under a 3-skill joint training setting, the single model achieves an average GSR of 94.79% and OSR of 90.62%, showing little evidence of catastrophic forgetting. It can continuously invoke multiple skills (e.g., Sleeve Placement → Large Spring Insertion → Rod Seating → Nut Seating) under natural language instructions to accomplish long-horizon assembly.
             </p>
           </div>
           <div class="has-text-centered">
