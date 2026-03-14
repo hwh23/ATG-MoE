@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ATG-MoE: Autoregressive trajectory generation with mixture-of-experts for assembly skill learning</title>
+  
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  
+  <style>
+    .publication-title { margin-bottom: 20px; font-weight: bold; }
+    .publication-authors { margin-bottom: 10px; }
+    .author-block { margin-right: 15px; }
+    .institution-block { font-size: 0.9em; color: #666; margin-top: 10px; }
+    .institution-space { margin-left: 20px; } 
+    a { color: #3273dc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .teaser-video { border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); } 
+    .bibtex-section { background-color: #f5f5f5; padding: 20px; border-radius: 5px; }
+  </style>
+</head>
+<body>
+
+  <section class="section">
+    <div class="container has-text-centered">
+      
+      <h1 class="title is-2 publication-title">
+        ATG-MoE: Autoregressive trajectory generation with mixture-of-experts for assembly skill learning
+      </h1>
+      
+      <div class="is-size-5 publication-authors">
+        <span class="author-block">
+          <a href="#">Weihang Huang</a><sup>1</sup>†, 
+        </span>
+        <span class="author-block">
+          <a href="#">Chaoran Zhang</a><sup>1</sup>†, 
+        </span>
+        <span class="author-block">
+          <a href="#">Xiaoxin Deng</a><sup>2</sup>†, 
+        </span>
+        <span class="author-block">
+          <a href="#">Hao Zhou</a><sup>1</sup>, 
+        </span>
+        <span class="author-block">
+          <a href="#">Zhaobo Xu</a><sup>1</sup>,
+        </span>
+        <span class="author-block">
+          <a href="#">Shubo Cui</a><sup>1</sup>, 
+        </span>
+        <span class="author-block">
+          <a href="#">Long Zeng</a><sup>1</sup>*
+        </span>
+      </div>
+
+      <div class="institution-block">
+        <span class="author-block"><sup>1</sup>Tsinghua University </span>
+        <span class="author-block institution-space"><sup>2</sup>Imperial College London</span>
+      </div>
+
+      <div class="buttons is-centered" style="margin-top: 20px;">
+        <a href="#" class="button is-dark is-rounded">
+          <span>📄 Paper (PDF)</span>
+        </a>
+        <a href="#" class="button is-dark is-rounded" disabled title="Code will be open-sourced after review">
+          <span>💻 Code (To be released after review)</span>
+        </a>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="section" style="padding-top: 0;">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column is-10 has-text-centered">
+          <video class="teaser-video" autoplay muted loop playsinline width="100%">
+            <source src="./static/videos/ur3_assembly_demo.mp4" type="video/mp4">
+            您的浏览器不支持视频播放。
+          </video>
+          <h2 class="subtitle has-text-centered" style="margin-top: 15px; font-size: 1.1em; color: #555;">
+            <strong>ATG-MoE</strong> establishes a closed-loop mapping from multimodal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories.
+          </h2>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column is-10">
+          <h2 class="title is-3 has-text-centered">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+              Flexible manufacturing requires robot systems that can adapt to changing tasks, object categories, and environmental conditions. However, traditional robot programming is labor-intensive and inflexible, while existing learning-based assembly methods often suffer from weak positional generalization, complex multi-stage designs, and limited multi-skill integration capability. To address these issues, this paper proposes ATG-MoE, an end-to-end autoregressive trajectory generation method with mixture of experts for assembly skill learning from demonstration.
+            </p>
+            <p>
+              The proposed method establishes a closed-loop mapping from multimodal inputs, including RGB-D observations and natural language instructions, to manipulation trajectories. It integrates multimodal feature fusion for scene and task understanding, autoregressive sequence modeling for temporally coherent trajectory generation, and a mixture-of-experts architecture for unified multi-skill learning through the balance of shared knowledge and skill specialization. In contrast to conventional frameworks that separate perception and control or train different skills independently, ATG-MoE directly incorporates visual information into trajectory generation and supports efficient multi-skill integration within a single model.
+            </p>
+            <p>
+              We train and evaluate the proposed method on eight representative assembly skills from a pressure-reducing valve assembly task. Experimental results show that ATG-MoE achieves strong overall performance in simulation, with an average grasp success rate of 96.3% and an average overall success rate of 91.8%, while also demonstrating strong generalization and effective multi-skill integration. Real-world experiments further verify its practicality for multi-skill industrial assembly.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column is-10">
+          <h2 class="title is-3 has-text-centered">Methodology</h2>
+          
+          <div class="has-text-centered" style="margin-bottom: 20px;">
+            <img src="./static/images/architecture.png" alt="ATG-MoE Architecture Diagram" style="width: 100%; border-radius: 5px;">
+            <p class="is-size-7 has-text-grey" style="margin-top: 10px;">
+              <strong>Figure 1:</strong> Overview of ATG-MoE framework with its three main modules.
+            </p>
+          </div>
+
+          <div class="content has-text-justified">
+            <p>
+              The method establishes a closed-loop learning pipeline that maps multimodal inputs, including RGB-D images and natural language instructions, to trajectory outputs. The core contribution of ATG-MoE lies in the coordinated design of three modules:
+            </p>
+            <ul>
+              <li><strong>Multimodal feature extraction and fusion:</strong> Improve the robot's integrated understanding of 3D spatial information, scene semantics, and skill goals by encoding and combining visual perception with instructions.</li>
+              <li><strong>Autoregressive trajectory generation:</strong> Introduces a sequence modeling mechanism based on conditional probability, where subsequent actions are predicted from historical trajectories together with multimodal scene information, thereby ensuring temporal continuity and dynamic adaptability in the generated trajectory.</li>
+              <li><strong>Multi-skill learning:</strong> Adopts a mixture-of-experts architecture, in which a skill-specific routing network learns expert combinations tailored to different skills, while shared experts support the learning of common knowledge.</li>
+            </ul>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3">BibTeX</h2>
+      <pre class="bibtex-section"><code>@article{huang2026atgmoe,
+  title={ATG-MoE: Autoregressive trajectory generation with mixture-of-experts for assembly skill learning},
+  author={Weihang Huang and Chaoran Zhang and Xiaoxin Deng and Hao Zhou and Zhaobo Xu and Shubo Cui and Long Zeng},
+  journal={Under Review},
+  year={2026}
+}</code></pre>
+    </div>
+  </section>
+
+</body>
+</html>
