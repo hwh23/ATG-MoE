@@ -1,6 +1,6 @@
 # ATG-MoE
 
-[cite_start]**ATG-MoE: Autoregressive trajectory generation with mixture-of-experts for assembly skill learning** [cite: 1]
+**ATG-MoE: Autoregressive trajectory generation with mixture-of-experts for assembly skill learning**
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://hwh23.github.io/ATG-MoE//)
 
