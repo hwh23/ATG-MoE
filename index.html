@@ -72,7 +72,7 @@
   <section class="section" style="padding-top: 0;">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
-        <div class="column is-10 has-text-centered">
+        <div class="column is-full has-text-centered">
           <video class="teaser-video" autoplay muted loop playsinline width="100%">
             <source src="./static/videos/ur3_assembly_demo.mp4" type="video/mp4">
             您的浏览器不支持视频播放。
@@ -88,7 +88,7 @@
   <section class="section">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
-        <div class="column is-10">
+        <div class="column is-full">
           <h2 class="title is-3 has-text-centered">Abstract</h2>
           <div class="content has-text-justified">
             <p>
@@ -109,7 +109,7 @@
   <section class="section">
     <div class="container is-max-desktop">
       <div class="columns is-centered">
-        <div class="column is-10">
+        <div class="column is-full">
           <h2 class="title is-3 has-text-centered">Methodology</h2>
           
           <div class="has-text-centered" style="margin-bottom: 20px;">
@@ -132,6 +132,89 @@
 
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Experiments & Results</h2>
+      <p class="has-text-centered" style="margin-bottom: 40px;">
+        We evaluate ATG-MoE through comprehensive simulation and real-world assembly experiments to answer five key research questions.
+      </p>
+
+      <div class="columns is-centered" style="margin-bottom: 40px;">
+        <div class="column is-full">
+          <h3 class="title is-4">1. Execution Accuracy, Safety, and Generalization (RQ1 & RQ2)</h3>
+          <div class="content has-text-justified">
+            <p>
+              <strong>Can ATG-MoE achieve high accuracy and safety, and generalize to varying object positions?</strong><br>
+              In simulation comparisons against strong baselines (DP, ACT, RVT-2), ATG-MoE achieves the most balanced and competitive performance. Under the challenging "Hard" setting with unseen tray locations, it maintains a Grasp Success Rate (GSR) of 96.49% and an Overall Success Rate (OSR) of 91.41%. It also achieves the lowest collision rate (4.1% on average) and the lowest average success step, generating safer and more efficient trajectories. 
+            </p>
+          </div>
+          <div class="has-text-centered">
+            <img src="./static/images/table1.png" alt="Simulation Results Table" style="width: 90%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <p class="is-size-7 has-text-grey"><strong>Table 1:</strong> Comparison of different methods in simulation experiments.</p>
+            
+            <img src="./static/images/figure9.png" alt="Trajectory Visualization" style="width: 80%; margin-top: 20px; border-radius: 5px;">
+            <p class="is-size-7 has-text-grey"><strong>Figure 9:</strong> 3D representation of successful trajectories for the Large Spring Insertion skill. ATG-MoE generates trajectories most consistent with the ground-truth demonstration.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="columns is-centered" style="margin-bottom: 40px;">
+        <div class="column is-full">
+          <h3 class="title is-4">2. Cross-skill Generalization (RQ3)</h3>
+          <div class="content has-text-justified">
+            <p>
+              <strong>Can ATG-MoE generalize to unseen skills?</strong><br>
+              The heatmaps indicate that ATG-MoE learns partially transferable perception-control patterns rather than merely memorizing single-skill trajectories. Cross-skill generalization is particularly strong at the grasping stage, with skills of the same category being more transferable to each other. <i>Rod Seating</i> emerges as the most representative source skill, demonstrating the strongest outward transferability.
+            </p>
+          </div>
+          <div class="has-text-centered">
+            <img src="./static/images/figure11.png" alt="Cross-skill Generalization Heatmaps" style="width: 85%; border-radius: 5px;">
+            <p class="is-size-7 has-text-grey"><strong>Figure 11:</strong> Heatmaps evaluating the cross-skill generalization capability of ATG-MoE (left: Grasp Success Rate, right: Overall Success Rate).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="columns is-centered" style="margin-bottom: 40px;">
+        <div class="column is-full">
+          <h3 class="title is-4">3. Multi-skill Integration (RQ4)</h3>
+          <div class="content has-text-justified">
+            <p>
+              <strong>Can ATG-MoE support integrated learning and coordinated invocation of multiple skills?</strong> <br>
+              Through its MoE design, ATG-MoE simultaneously captures shared knowledge across skills while preserving skill-specific specialization. Under a 3-skill joint training setting, the single model achieves an average GSR of 94.79% and OSR of 90.62%, showing little evidence of catastrophic forgetting. It can continuously invoke multiple skills (e.g., Sleeve Placement → Large Spring Insertion → Rod Seating) under natural language instructions to accomplish long-horizon assembly.
+            </p>
+          </div>
+          <div class="has-text-centered">
+            <img src="./static/images/table3.png" alt="Multi-skill Learning Table" style="width: 80%; margin-bottom: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <p class="is-size-7 has-text-grey"><strong>Table 3:</strong> Evaluation of the multi-skill learning capability using three skills from different categories.</p>
+
+            <img src="./static/images/figure12.png" alt="Application Scenario" style="width: 90%; margin-top: 20px; border-radius: 5px;">
+            <p class="is-size-7 has-text-grey"><strong>Figure 12:</strong> Application scenario of multi-skill integration guided by natural language instructions.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="columns is-centered" style="margin-bottom: 20px;">
+        <div class="column is-full">
+          <h3 class="title is-4">4. Real-world Deployment (RQ5)</h3>
+          <div class="content has-text-justified">
+            <p>
+              <strong>Can the method be deployed on a real robotic platform effectively?</strong><br>
+              Adopting a sim-to-real pipeline with minor real-world fine-tuning, ATG-MoE was deployed on a physical UR3 robot unit. Over eight evaluated skills tested with visually disturbed conditions (varying parts on the tray), the model achieved consistently high grasp and overall success rates. Qualitative execution sequences confirm that ATG-MoE robustly accomplishes the full pipeline from grasp preparation to final assembly.
+            </p>
+          </div>
+          <div class="has-text-centered">
+            <img src="./static/images/figure13.png" alt="Real-world Execution Sequences" style="width: 100%; margin-bottom: 15px; border-radius: 5px;">
+            <p class="is-size-7 has-text-grey"><strong>Figure 13:</strong> Real-world execution sequences of representative assembly skills.</p>
+            
+            <img src="./static/images/table4.png" alt="Real-world Results Table" style="width: 60%; margin-top: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <p class="is-size-7 has-text-grey"><strong>Table 4:</strong> ATG-MoE’s performance across different skills in real-world experiments.</p>
+          </div>
+        </div>
+      </div>
+
     </div>
   </section>
 
